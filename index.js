@@ -2,12 +2,11 @@ import fetch from "node-fetch";
 import { spawn } from "child_process";
 
 /* ================== CONFIG ================== */
-const USER_ACCESS_TOKEN =
-  "EAAKXMxkBFCIBQLNxhcHEE3nI7bm9gHpJsoFBeQ8ZCtoUeEtTZBNkgmiYhDFBhsIYfPvzI4aUZC3SZAwHSb3jh09lncfAFkSWgfnFKbYUmwSkXctMIrK7JYEBvWUbOkZBjU3dZCG0Yds2KYDxAWDxe3YIbw4FZAwZCKJgQFZBog8PZAGolhkIZCp5dEZCbS9C8XM0LZCR7vsZBTlvk0n0MbCHEtwf3SzuQxa3QvrLKoHc4e";
-
+const USER_ACCESS_TOKEN = "EAAKXMxkBFCIBQLNxhcHEE3nI7bm9gHpJsoFBeQ8ZCtoUeEtTZBNkgmiYhDFBhsIYfPvzI4aUZC3SZAwHSb3jh09lncfAFkSWgfnFKbYUmwSkXctMIrK7JYEBvWUbOkZBjU3dZCG0Yds2KYDxAWDxe3YIbw4FZAwZCKJgQFZBog8PZAGolhkIZCp5dEZCbS9C8XM0LZCR7vsZBTlvk0n0MbCHEtwf3SzuQxa3QvrLKoHc4e";
 const PAGE_NAME = "Imran books";
-const POST_ID = "113309070355643_1347681650702049";
+const POST_ID = "113309070355643_1347681650702049"; 
 
+/* ===== STREAM LIST ===== */
 const STREAMS = [
   { name: "beIN SPORTS", url: "http://dhoomtv.xyz/8zpo3GsVY7/beneficial2concern/274160" },
   { name: "beIN SPORTS News", url: "http://dhoomtv.xyz/8zpo3GsVY7/beneficial2concern/274161" },
@@ -15,157 +14,149 @@ const STREAMS = [
 ];
 
 /* ================== HELPERS ================== */
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-async function fetchJSON(url, options = {}) {
+async function fetchJSON(url, options) {
   const res = await fetch(url, options);
-  const json = await res.json();
-  if (json.error) throw new Error(JSON.stringify(json.error));
-  return json;
+  const data = await res.json();
+  if (data.error) throw new Error(JSON.stringify(data.error));
+  return data;
 }
 
-/* ================== 1. GET PAGE TOKEN ================== */
+/* ================== 1. PAGE TOKEN ================== */
 async function getPageToken() {
-  const data = await fetchJSON(
-    `https://graph.facebook.com/v19.0/me/accounts?access_token=${USER_ACCESS_TOKEN}`
-  );
-  const page = data.data.find(p => p.name === PAGE_NAME);
-  if (!page) throw new Error("Page not found");
-  return { pageId: page.id, pageToken: page.access_token };
+  const data = await fetchJSON(`https://graph.facebook.com/v19.0/me/accounts?access_token=${USER_ACCESS_TOKEN}`);
+  const page = data.data.find((p) => p.name === PAGE_NAME);
+  if (!page) throw new Error("Page not found or no admin access");
+  console.log("✅ Page token ready");
+  return { id: page.id, token: page.access_token };
 }
 
-/* ================== 2. CREATE LIVES ================== */
-async function createAllLives(pageId, pageToken) {
-  const lives = [];
+/* ================== 2. CREATE LIVE ================== */
+async function createLive(pageId, pageToken, title) {
+  const data = await fetchJSON(`https://graph.facebook.com/v19.0/${pageId}/live_videos?access_token=${pageToken}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      status: "UNPUBLISHED",
+      title,
+      description: title,
+      stream_publish: "false",
+      enable_backup_ingest: "true",
+    }),
+  });
 
-  for (const stream of STREAMS) {
-    const data = await fetchJSON(
-      `https://graph.facebook.com/v19.0/${pageId}/live_videos?access_token=${pageToken}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          status: "UNPUBLISHED",
-          title: stream.name,
-          description: stream.name,
-          stream_publish: "false",
-          enable_backup_ingest: "true",
-        }),
-      }
-    );
-
-    lives.push({
-      name: stream.name,
-      input: stream.url,
-      liveId: data.id,
-      rtmp: data.stream_url,
-    });
-
-    console.log(`✅ RTMP ready for ${stream.name}`);
-    await sleep(1500); // Slight delay between live creations
-  }
-
-  return lives;
+  const rtmpUrls = [data.stream_url, ...(data.stream_secondary_urls || [])];
+  console.log(`🎥 Live created: ${title}`);
+  return { id: data.id, rtmpUrls };
 }
 
 /* ================== 3. START FFMPEG ================== */
-async function startAllFFmpeg(lives) {
-  for (const live of lives) {
-    console.log(`🚀 Starting FFmpeg → ${live.name}`);
+function startFFmpegCopy(input, rtmpUrls, title) {
+  let index = 0;
 
-    const ffmpeg = spawn("ffmpeg", [
-      "-re",
-      "-i", live.input,
-      "-c", "copy",
-      "-f", "flv",
-      "-reconnect", "1",
-      "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "2",
-      live.rtmp,
-    ]);
+  const run = () => {
+    if (index >= rtmpUrls.length) {
+      console.error(`❌ All RTMPS failed for ${title}`);
+      return;
+    }
 
-    ffmpeg.stderr.on("data", (d) => console.log(`[FFmpeg ${live.name}] ${d.toString()}`));
-    ffmpeg.on("exit", (code) => console.log(`[FFmpeg ${live.name}] exited with code ${code}`));
+    console.log(`🚀 Starting FFmpeg for: ${title}`);
+    // Added -re to ensure stream reads at native frame rate
+    const ffmpeg = spawn("ffmpeg", ["-re", "-i", input, "-c", "copy", "-f", "flv", rtmpUrls[index]]);
 
-    // Wait 2 minutes after starting each stream (optional)
-    console.log(`🕒 Waiting 2 minutes after starting ${live.name}...`);
-    await sleep(10000);
-  }
-}
+    ffmpeg.stderr.on("data", (data) => {
+        // Optional: reduce console noise by only logging errors
+        const msg = data.toString();
+        if(msg.includes("error") || msg.includes("failed")) console.log(`[FFmpeg ${title}] ${msg}`);
+    });
 
-/* ================== 4. GET MPDs ================== */
-async function getAllMPDs(lives, pageToken) {
-  const servers = [];
-
-  for (const live of lives) {
-    let mpd = null;
-
-    for (let i = 0; i < 12; i++) {
-      const data = await fetchJSON(
-        `https://graph.facebook.com/v19.0/${live.liveId}?fields=dash_preview_url&access_token=${pageToken}`
-      );
-
-      if (data.dash_preview_url) {
-        mpd = data.dash_preview_url;
-        break;
+    ffmpeg.on("close", (code) => {
+      if (code !== 0) {
+        console.warn(`⚠️ FFmpeg failed for ${title}, switching to next backup in 5s...`);
+        setTimeout(() => {
+            index++;
+            run();
+        }, 5000);
       }
+    });
+  };
 
-      await sleep(5000); // Retry every 5s
-    }
-
-    if (mpd) {
-      servers.push({ name: live.name, mpd });
-      console.log(`🎯 MPD ready for ${live.name}`);
-    } else {
-      console.warn(`⚠️ MPD timeout for ${live.name}`);
-    }
-  }
-
-  return servers;
+  run();
 }
 
-/* ================== 5. UPDATE POST ================== */
-async function updatePost(pageToken, servers) {
+/* ================== 4. GET MPD URL ================== */
+async function getLiveMPD(liveId, pageToken) {
+  for (let i = 0; i < 15; i++) { // Increased retries
+    const data = await fetchJSON(`https://graph.facebook.com/v19.0/${liveId}?fields=dash_preview_url&access_token=${pageToken}`);
+    if (data.dash_preview_url) return data.dash_preview_url;
+    await sleep(5000);
+  }
+  return null;
+}
+
+/* ================== 5. EDIT POST ================== */
+async function editPost(pageToken, content) {
+  await fetchJSON(`https://graph.facebook.com/v19.0/${POST_ID}?access_token=${pageToken}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message: content }),
+  });
+}
+
+/* ================== 6. FORMAT POST ================== */
+function formatPost(json) {
   let text = "🔴 LIVE SERVERS\n\n";
-  servers.forEach((s, i) => {
+  json.servers.forEach((s, i) => {
     text += `📡 ${i + 1}. ${s.name}\n${s.mpd}\n\n`;
   });
-
-  await fetchJSON(
-    `https://graph.facebook.com/v19.0/${POST_ID}?access_token=${pageToken}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text }),
-    }
-  );
-
-  console.log("✅ Post updated");
+  text += `🕒 Last Updated: ${new Date().toLocaleTimeString()}`;
+  return text;
 }
 
-/* ================== 6. MAIN ================== */
+/* ================== 7. MAIN ================== */
 (async () => {
   try {
-    const { pageId, pageToken } = await getPageToken();
+    const { id: pageId, token } = await getPageToken();
+    const mpdData = { servers: [] };
 
-    console.log("🟡 STEP 1 → Creating lives");
-    const lives = await createAllLives(pageId, pageToken);
+    console.log(`🚀 Starting initialization for ${STREAMS.length} streams...`);
 
-    console.log("🟡 STEP 2 → Starting FFmpeg");
-    await startAllFFmpeg(lives);
+    // We use a regular loop instead of Promise.all to add time between requests
+    for (const stream of STREAMS) {
+      try {
+        console.log(`--- Processing: ${stream.name} ---`);
+        const live = await createLive(pageId, token, stream.name);
+        
+        // Wait 3 seconds before starting FFmpeg to ensure FB ingest is ready
+        await sleep(3000);
+        startFFmpegCopy(stream.url, live.rtmpUrls, stream.name);
 
-    console.log("🟡 STEP 3 → Extracting MPDs");
-    const servers = await getAllMPDs(lives, pageToken);
+        // Wait 10 seconds for the stream to process on FB before asking for MPD
+        await sleep(10000); 
+        const mpd = await getLiveMPD(live.id, token);
+        
+        if (mpd) {
+          mpdData.servers.push({ name: stream.name, live_id: live.id, mpd });
+          console.log(`✅ MPD Obtained for ${stream.name}`);
+        }
 
-    if (servers.length) {
-      console.log("🟡 STEP 4 → Updating post");
-      await updatePost(pageToken, servers);
+        // Delay between starting different streams to avoid API flooding
+        console.log(`Waiting 3 seconds before next stream...`);
+        await sleep(3000);
+
+      } catch (err) {
+        console.error(`❌ Stream failed: ${stream.name}`, err.message);
+      }
     }
 
-    console.log("🎉 DONE: All streams started and post updated");
+    if (mpdData.servers.length > 0) {
+      const postText = formatPost(mpdData);
+      await editPost(token, postText);
+      console.log("✅ Post updated successfully");
+    }
 
-  } catch (e) {
-    console.error("❌ ERROR:", e.message);
+  } catch (err) {
+    console.error("FATAL ERROR:", err.message);
   }
 })();
-
