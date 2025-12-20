@@ -1,5 +1,6 @@
 {
   "dependencies": {
+    "ffmpeg": "^0.0.4",
     "node-fetch": "^3.3.2",
     "pm2": "^6.0.14"
   }
