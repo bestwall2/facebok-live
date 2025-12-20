@@ -155,7 +155,7 @@ function formatPost(json) {
 
     if (mpdData.servers.length > 0) {
       const postText = formatPost(mpdData);
-      await editPost(token, postText);
+      await editPost(POST_TOKEN, postText);
       console.log("✅ Post updated successfully");
     }
 
