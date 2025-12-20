@@ -70,19 +70,25 @@ async function createAllLives(pageId, pageToken) {
 /* ================== 3. START ALL FFMPEG ================== */
 function startAllFFmpeg(lives) {
   lives.forEach(live => {
-    console.log(`🚀 Starting FFmpeg → ${live.name}`);
+    (async () => {
+      console.log(`🚀 Starting FFmpeg → ${live.name}`);
 
-    const ffmpeg = spawn("ffmpeg", [
-      "-re",
-      "-i", live.input,
-      "-c", "copy",
-      "-f", "flv",
-      live.rtmp,
-    ]);
+      const ffmpeg = spawn("ffmpeg", [
+        "-re",
+        "-i", live.input,
+        "-c", "copy",
+        "-f", "flv",
+        live.rtmp,
+      ]);
 
-    ffmpeg.stderr.on("data", d =>
-      console.log(`[FFmpeg ${live.name}] ${d.toString()}`)
-    );
+      ffmpeg.stderr.on("data", d =>
+        console.log(`[FFmpeg ${live.name}] ${d.toString()}`)
+      );
+
+      // Sleep 2 minutes after starting this stream
+      console.log(`🕒 Waiting 2 minutes after starting ${live.name}...`);
+      await sleep(8000);
+    })();
   });
 }
 
