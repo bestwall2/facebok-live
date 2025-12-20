@@ -9,7 +9,7 @@ const USER_ACCESS_TOKEN =
 const POST_TOKEN =
   "EAAKXMxkBFCIBQE9RYVPdKqCT697AtGFZC0fwy99hy3ZCK3lhT1Cb5hFIViJZC8tAKIDL4QzOtVPpEqG7LhDKc8cqF1MdBCi9mfZCMYHOZAPsVZAG99JKnm8lSOg6LFXylgKGSi2LSPOoZBTZAOgVfTSuYAbzl38NDmz6GUrp1B1K2gV6TGqSNOQC5LDZB6hhvGJvm7oZBr3BBlb42OVmDXpm6eG0wKU421xY1bx64NURpoHU6120XsZA5BOVgZDZD";
 
-const PAGE_NAME = "Testing Page";
+const PAGE_NAME = "Page Test";
 const POST_ID = "113309070355643_1347681650702049";
 
 /* ===== STREAM LIST ===== */
@@ -62,7 +62,7 @@ async function createLive(pageId, pageToken, title) {
         status: "UNPUBLISHED",
         title,
         description: title,
-        stream_publish: false,
+        
       }),
     }
   );
