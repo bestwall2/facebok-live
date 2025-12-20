@@ -4,6 +4,7 @@ import { spawn } from "child_process";
 /* ================== CONFIG ================== */
 const USER_ACCESS_TOKEN =
   "EAAKXMxkBFCIBQN8ZCGkQZB1qgo2zzX80bbthq2n0WY25koXwRrtu29B16FDchK7u8lZCb9W1FM6XCgVj4Vl8f0yn1NOjR9zZAtfRKZCdGiY9xJcoerBTLUXGpTZCHufGGB5Ysky2U362ISLmVZA0WkcwFZBWHri7LACajXyREchxsXDYX84qNvSOx6J4iVfeH7lpvcKcXxIZCZCZB2WiT5PHLGx3M1sZCO9T7Uo0KcLgz3bqZAQZDZD";
+
 const PAGE_NAME = "Imran books";
 const POST_ID = "113309070355643_1347681650702049";
 
@@ -23,7 +24,7 @@ async function fetchJSON(url, options = {}) {
   return json;
 }
 
-/* ================== 1. PAGE TOKEN ================== */
+/* ================== 1. GET PAGE TOKEN ================== */
 async function getPageToken() {
   const data = await fetchJSON(
     `https://graph.facebook.com/v19.0/me/accounts?access_token=${USER_ACCESS_TOKEN}`
@@ -33,7 +34,7 @@ async function getPageToken() {
   return { pageId: page.id, pageToken: page.access_token };
 }
 
-/* ================== 2. CREATE ALL LIVES ================== */
+/* ================== 2. CREATE LIVES ================== */
 async function createAllLives(pageId, pageToken) {
   const lives = [];
 
@@ -61,38 +62,38 @@ async function createAllLives(pageId, pageToken) {
     });
 
     console.log(`✅ RTMP ready for ${stream.name}`);
-    await sleep(1500);
+    await sleep(1500); // Slight delay between live creations
   }
 
   return lives;
 }
 
-/* ================== 3. START ALL FFMPEG ================== */
-function startAllFFmpeg(lives) {
-  lives.forEach(live => {
-    (async () => {
-      console.log(`🚀 Starting FFmpeg → ${live.name}`);
+/* ================== 3. START FFMPEG ================== */
+async function startAllFFmpeg(lives) {
+  for (const live of lives) {
+    console.log(`🚀 Starting FFmpeg → ${live.name}`);
 
-      const ffmpeg = spawn("ffmpeg", [
-        "-re",
-        "-i", live.input,
-        "-c", "copy",
-        "-f", "flv",
-        live.rtmp,
-      ]);
+    const ffmpeg = spawn("ffmpeg", [
+      "-re",
+      "-i", live.input,
+      "-c", "copy",
+      "-f", "flv",
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "2",
+      live.rtmp,
+    ]);
 
-      ffmpeg.stderr.on("data", d =>
-        console.log(`[FFmpeg ${live.name}] ${d.toString()}`)
-      );
+    ffmpeg.stderr.on("data", (d) => console.log(`[FFmpeg ${live.name}] ${d.toString()}`));
+    ffmpeg.on("exit", (code) => console.log(`[FFmpeg ${live.name}] exited with code ${code}`));
 
-      // Sleep 2 minutes after starting this stream
-      console.log(`🕒 Waiting 2 minutes after starting ${live.name}...`);
-      await sleep(8000);
-    })();
-  });
+    // Wait 2 minutes after starting each stream (optional)
+    console.log(`🕒 Waiting 2 minutes after starting ${live.name}...`);
+    await sleep(10000);
+  }
 }
 
-/* ================== 4. GET ALL MPD ================== */
+/* ================== 4. GET MPDs ================== */
 async function getAllMPDs(lives, pageToken) {
   const servers = [];
 
@@ -109,7 +110,7 @@ async function getAllMPDs(lives, pageToken) {
         break;
       }
 
-      await sleep(5000);
+      await sleep(5000); // Retry every 5s
     }
 
     if (mpd) {
@@ -123,7 +124,7 @@ async function getAllMPDs(lives, pageToken) {
   return servers;
 }
 
-/* ================== 5. POST ================== */
+/* ================== 5. UPDATE POST ================== */
 async function updatePost(pageToken, servers) {
   let text = "🔴 LIVE SERVERS\n\n";
   servers.forEach((s, i) => {
@@ -142,7 +143,7 @@ async function updatePost(pageToken, servers) {
   console.log("✅ Post updated");
 }
 
-/* ================== 6. MAIN FLOW ================== */
+/* ================== 6. MAIN ================== */
 (async () => {
   try {
     const { pageId, pageToken } = await getPageToken();
@@ -151,20 +152,17 @@ async function updatePost(pageToken, servers) {
     const lives = await createAllLives(pageId, pageToken);
 
     console.log("🟡 STEP 2 → Starting FFmpeg");
-    startAllFFmpeg(lives);
+    await startAllFFmpeg(lives);
 
-    console.log("🟡 STEP 3 → Waiting before MPD");
-    await sleep(50000);
-
-    console.log("🟡 STEP 4 → Extracting MPDs");
+    console.log("🟡 STEP 3 → Extracting MPDs");
     const servers = await getAllMPDs(lives, pageToken);
 
     if (servers.length) {
-      console.log("🟡 STEP 5 → Posting");
+      console.log("🟡 STEP 4 → Updating post");
       await updatePost(pageToken, servers);
     }
 
-    console.log("🎉 DONE: 3 RTMP → 3 FFmpeg → 3 MPD");
+    console.log("🎉 DONE: All streams started and post updated");
 
   } catch (e) {
     console.error("❌ ERROR:", e.message);
