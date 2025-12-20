@@ -2,7 +2,11 @@ import fetch from "node-fetch";
 import { spawn } from "child_process";
 
 /* ================== CONFIG ================== */
-const USER_ACCESS_TOKEN = "YOUR_USER_ACCESS_TOKEN";
+const USER_ACCESS_TOKEN = "EAАKXМ×kBFCIBQNс3VmХSmqPTmUWBrhsyQpPaJ-
+С1iX9DXНgxVTK4J1h7nnmQ6MQxoYWbPW1-
+AV8ZBecwBz80EzS8cosZCcGH60s2X4zg4HQIZAj1-E2iFwBeJРc6FziLdYk5LiМJr3JVØWMZAyGd3B1rs-
+WMTZZAN9HsZCL636TvmsDThECYEOhHAeqkOnKWc8-fYSJjm89МХ5G4wRZСЗrZAHВРjtХKmxU5ZAz-
+QR6mjxwJv0cZC1Di9EugVtEpNC5gNj5xwG5gFi5d— GWeXrTnX0Q0194ZBzPdj5hKM1130kZD";
 const PAGE_NAME = "Imran books";
 const POST_ID = "113309070355643_1347681650702049"; // The post to update
 
