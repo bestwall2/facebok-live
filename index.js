@@ -4,6 +4,7 @@ import { spawn } from "child_process";
 /* ================== CONFIG ================== */
 const USER_ACCESS_TOKEN =
   "EAAKXMxkBFCIBQN8ZCGkQZB1qgo2zzX80bbthq2n0WY25koXwRrtu29B16FDchK7u8lZCb9W1FM6XCgVj4Vl8f0yn1NOjR9zZAtfRKZCdGiY9xJcoerBTLUXGpTZCHufGGB5Ysky2U362ISLmVZA0WkcwFZBWHri7LACajXyREchxsXDYX84qNvSOx6J4iVfeH7lpvcKcXxIZCZCZB2WiT5PHLGx3M1sZCO9T7Uo0KcLgz3bqZAQZDZD";
+
 const PAGE_NAME = "Imran books";
 const POST_ID = "113309070355643_1347681650702049"; // The post to update
 
@@ -184,4 +185,3 @@ function formatPost(json) {
     console.error("ERROR:", err.message);
   }
 })();
-/* ================== END ================== */
