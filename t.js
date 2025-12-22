@@ -95,28 +95,14 @@ class StreamManager {
         Logger.log('🚀 START', `Starting: ${name}`, id);
         TelegramBot.sendAlert(id, `🚀 <b>STARTING STREAM</b>\nName: ${name}\nID: ${id}`, 'newStream');
         
-        // Convert RTMPS to RTMP (Facebook accepts RTMP)
-        let streamUrl = rtmps_url;
-       
+        
         
         // Robust FFmpeg command with encoding
-        const ffmpeg = spawn("ffmpeg", [
-            "-re",                    // Read input at native framerate
-            "-i", rtmp_source,        // Input source
-            "-c:v", "libx264",        // Video codec
-            "-preset", "ultrafast",   // Fast encoding
-            "-pix_fmt", "yuv420p",    // Pixel format
-            "-r", "25",               // Frame rate
-            "-g", "50",               // GOP size
-            "-b:v", "2000k",          // Video bitrate
-            "-maxrate", "2000k",      // Max bitrate
-            "-bufsize", "4000k",      // Buffer size
-            "-c:a", "aac",            // Audio codec
-            "-ar", "44100",           // Audio sample rate
-            "-b:a", "128k",           // Audio bitrate
-            "-ac", "2",               // Audio channels
+        const ffmpeg = spawn("ffmpeg", [                         
+            "-i", rtmp_source,          // Input source URL
+            "-c", "copy",             // Copy codec (no re-encoding)
             "-f", "flv",              // Output format
-            streamUrl                 // Output URL
+            rtmps_url                 // Output URL
         ]);
         
         // Store stream info
