@@ -1,36 +1,73 @@
 // ================== IMPORTS ==================
 import { spawn } from 'child_process';
 import { writeFileSync, appendFileSync } from 'fs';
-import { setTimeout } from 'timers/promises';
 
 // ================== CONFIGURATION ==================
 const CONFIG = {
     api: {
         url: "https://ani-box-nine.vercel.app/api/grok-chat",
-        pollInterval: 30000,  // Check every 30 seconds
-        retryDelay: 10000
+        pollInterval: 30000  // Check every 30 seconds
     },
     telegram: {
-        botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",  // Get from @BotFather
+        botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",
         chatId: "5806630118",
-        enabled: false,
+        enabled: true,
         alerts: {
             newStream: true,
             stoppedStream: true,
             streamError: true,
-            apiError: false
+            apiError: true
         }
-    },
-    logging: {
-        logFile: "streams.log",
-        statusReportInterval: 300000
     }
 };
 
 // ================== GLOBAL STATE ==================
-let activeStreams = new Map();
-let lastStatusReport = Date.now();
-let apiErrorCount = 0;
+let activeStreams = new Map();  // id -> {process, info, startTime}
+let lastTelegramAlert = new Map(); // id -> last alert time
+
+// ================== TELEGRAM BOT ==================
+class TelegramBot {
+    static async sendMessage(message) {
+        if (!CONFIG.telegram.enabled) return;
+        
+        try {
+            const url = `https://api.telegram.org/bot${CONFIG.telegram.botToken}/sendMessage`;
+            const response = await fetch(url, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    chat_id: CONFIG.telegram.chatId,
+                    text: message,
+                    parse_mode: 'HTML'
+                })
+            });
+            
+            if (!response.ok) {
+                const error = await response.text();
+                console.error('Telegram API error:', error);
+            }
+        } catch (error) {
+            console.error('Telegram send failed:', error.message);
+        }
+    }
+    
+    static async sendAlert(streamId, message, type = 'info') {
+        if (!CONFIG.telegram.enabled) return;
+        if (!CONFIG.telegram.alerts[type]) return;
+        
+        // Prevent spam: only send same alert every 5 minutes
+        const now = Date.now();
+        const lastAlert = lastTelegramAlert.get(streamId) || 0;
+        const alertKey = `${streamId}-${type}`;
+        
+        if (now - lastAlert < 300000) { // 5 minutes
+            return;
+        }
+        
+        await this.sendMessage(message);
+        lastTelegramAlert.set(alertKey, now);
+    }
+}
 
 // ================== SIMPLE LOGGER ==================
 class Logger {
@@ -38,78 +75,14 @@ class Logger {
         const timestamp = new Date().toLocaleTimeString();
         const logEntry = `[${timestamp}] ${level}${streamId ? ` [${streamId}]` : ''}: ${message}`;
         
-        // Console - only important messages
-        const showInConsole = level === 'ERROR' || level === 'START' || level === 'STOP' || 
-                             level === 'NEW' || level === 'STATUS';
+        // Always show in console
+        console.log(logEntry);
         
-        if (showInConsole) {
-            const colors = {
-                'START': '\x1b[32m',
-                'STOP': '\x1b[33m',
-                'NEW': '\x1b[36m',
-                'ERROR': '\x1b[31m',
-                'STATUS': '\x1b[35m',
-                'INFO': '\x1b[90m'
-            };
-            console.log(`${colors[level] || ''}${logEntry}\x1b[0m`);
-        }
-        
-        // File logging
+        // Log to file
         try {
-            appendFileSync(CONFIG.logging.logFile, logEntry + '\n');
+            appendFileSync('streams.log', logEntry + '\n');
         } catch (e) {
             console.error('Log file error:', e.message);
-        }
-        
-        // 5-minute status report
-        const now = Date.now();
-        if (now - lastStatusReport >= CONFIG.logging.statusReportInterval) {
-            this.showStatusReport();
-            lastStatusReport = now;
-        }
-    }
-    
-    static showStatusReport() {
-        console.log('\n' + '📊'.repeat(40));
-        console.log('5-MINUTE STATUS REPORT');
-        console.log(`Active streams: ${activeStreams.size}`);
-        console.log(`API errors: ${apiErrorCount}`);
-        
-        if (activeStreams.size > 0) {
-            console.log('\n🎥 ACTIVE STREAMS:');
-            activeStreams.forEach((stream, id) => {
-                const uptime = Math.floor((Date.now() - stream.startTime) / 1000);
-                const mins = Math.floor(uptime / 60);
-                const secs = uptime % 60;
-                console.log(`  ${stream.info.name} - ${mins}m ${secs}s`);
-            });
-        }
-        
-        console.log('📊'.repeat(40) + '\n');
-        
-        // Send Telegram status if enabled
-        if (CONFIG.telegram.enabled) {
-            this.sendTelegram(`📊 Status: ${activeStreams.size} streams active`, 'STATUS');
-        }
-    }
-    
-    static async sendTelegram(message, alertType = null) {
-        if (!CONFIG.telegram.enabled || !CONFIG.telegram.botToken || !CONFIG.telegram.chatId) return;
-        if (alertType && !CONFIG.telegram.alerts[alertType]) return;
-        
-        try {
-            const response = await fetch(`https://api.telegram.org/bot${CONFIG.telegram.botToken}/sendMessage`, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    chat_id: CONFIG.telegram.chatId,
-                    text: message,
-                    parse_mode: 'HTML'
-                })
-            });
-            return response.ok;
-        } catch (error) {
-            console.log('Telegram error:', error.message);
         }
     }
 }
@@ -119,19 +92,34 @@ class StreamManager {
     static startStream(streamInfo) {
         const { id, name, rtmps_url, rtmp_source } = streamInfo;
         
-        Logger.log('START', `Starting: ${name}`, id);
+        Logger.log('🚀 START', `Starting: ${name}`, id);
+        TelegramBot.sendAlert(id, `🚀 <b>STARTING STREAM</b>\nName: ${name}\nID: ${id}`, 'newStream');
         
-        if (CONFIG.telegram.enabled) {
-            Logger.sendTelegram(`🟢 STARTING: ${name}`, 'newStream');
+        // Convert RTMPS to RTMP (Facebook accepts RTMP)
+        let streamUrl = rtmps_url;
+        if (streamUrl.startsWith('rtmps://')) {
+            streamUrl = streamUrl.replace('rtmps://', 'rtmp://');
+            Logger.log('ℹ️ INFO', `Converted RTMPS to RTMP`, id);
         }
         
-        // Simple FFmpeg command
+        // Robust FFmpeg command with encoding
         const ffmpeg = spawn("ffmpeg", [
-            "-re",
-            "-i", rtmp_source,
-            "-c", "copy",
-            "-f", "flv",
-            rtmps_url
+            "-re",                    // Read input at native framerate
+            "-i", rtmp_source,        // Input source
+            "-c:v", "libx264",        // Video codec
+            "-preset", "ultrafast",   // Fast encoding
+            "-pix_fmt", "yuv420p",    // Pixel format
+            "-r", "25",               // Frame rate
+            "-g", "50",               // GOP size
+            "-b:v", "2000k",          // Video bitrate
+            "-maxrate", "2000k",      // Max bitrate
+            "-bufsize", "4000k",      // Buffer size
+            "-c:a", "aac",            // Audio codec
+            "-ar", "44100",           // Audio sample rate
+            "-b:a", "128k",           // Audio bitrate
+            "-ac", "2",               // Audio channels
+            "-f", "flv",              // Output format
+            streamUrl                 // Output URL
         ]);
         
         // Store stream info
@@ -139,7 +127,8 @@ class StreamManager {
             process: ffmpeg,
             info: streamInfo,
             startTime: Date.now(),
-            restartCount: 0
+            restartCount: 0,
+            isRunning: true
         };
         
         activeStreams.set(id, streamData);
@@ -150,40 +139,58 @@ class StreamManager {
             
             // Show connection success
             if (msg.includes('Opening') && msg.includes('output')) {
-                Logger.log('INFO', `Connected to Facebook`, id);
+                Logger.log('✅ SUCCESS', `Connected to Facebook`, id);
+            }
+            
+            // Show streaming progress
+            if (msg.includes('frame=') && msg.includes('fps=')) {
+                const frameMatch = msg.match(/frame=\s*(\d+)/);
+                const timeMatch = msg.match(/time=([\d:.]+)/);
+                if (frameMatch && parseInt(frameMatch[1]) % 100 === 0) {
+                    Logger.log('📊 PROGRESS', `Frame ${frameMatch[1]}, Time ${timeMatch ? timeMatch[1] : 'N/A'}`, id);
+                }
             }
             
             // Show errors
             if (msg.includes('error') || msg.includes('fail') || msg.includes('Invalid')) {
-                const errorMsg = msg.substring(0, 100);
-                Logger.log('ERROR', `FFmpeg: ${errorMsg}`, id);
-                if (CONFIG.telegram.enabled) {
-                    Logger.sendTelegram(`🔴 ERROR in ${name}: ${errorMsg}`, 'streamError');
-                }
-            }
-            
-            // Show progress (occasionally)
-            if (msg.includes('frame=') && Math.random() < 0.05) {
-                const frameMatch = msg.match(/frame=\s*(\d+)/);
-                const timeMatch = msg.match(/time=([\d:.]+)/);
-                if (frameMatch) {
-                    Logger.log('INFO', `Frame ${frameMatch[1]}${timeMatch ? `, Time ${timeMatch[1]}` : ''}`, id);
-                }
+                const errorMsg = msg.substring(0, 150);
+                Logger.log('❌ ERROR', `FFmpeg: ${errorMsg}`, id);
+                TelegramBot.sendAlert(id, `❌ <b>FFMPEG ERROR</b>\nStream: ${name}\nError: ${errorMsg}`, 'streamError');
             }
         });
         
         ffmpeg.on('close', (code) => {
-            Logger.log('STOP', `Stopped (code: ${code})`, id);
-            activeStreams.delete(id);
-            
-            // Auto-restart logic (max 2 attempts)
-            if (code !== 0 && streamData.restartCount < 2) {
-                streamData.restartCount++;
-                setTimeout(() => {
-                    Logger.log('INFO', `Restarting (attempt ${streamData.restartCount})`, id);
-                    StreamManager.startStream(streamInfo);
-                }, 5000);
+            const stream = activeStreams.get(id);
+            if (stream) {
+                stream.isRunning = false;
             }
+            
+            Logger.log('🛑 STOP', `Stopped with code ${code}`, id);
+            
+            if (code !== 0) {
+                TelegramBot.sendAlert(id, `🛑 <b>STREAM STOPPED</b>\nName: ${name}\nCode: ${code}`, 'streamError');
+            }
+            
+            // Auto-restart logic
+            if (stream && code !== 0 && stream.restartCount < 3) {
+                stream.restartCount++;
+                Logger.log('🔄 RESTART', `Attempt ${stream.restartCount}/3 in 10 seconds`, id);
+                
+                setTimeout(() => {
+                    if (activeStreams.get(id)?.isRunning === false) {
+                        Logger.log('🔄 RESTART', `Executing restart...`, id);
+                        StreamManager.startStream(streamInfo);
+                    }
+                }, 10000);
+            } else {
+                activeStreams.delete(id);
+            }
+        });
+        
+        ffmpeg.on('error', (error) => {
+            Logger.log('💥 FATAL', `FFmpeg process error: ${error.message}`, id);
+            TelegramBot.sendAlert(id, `💥 <b>PROCESS ERROR</b>\nStream: ${name}\nError: ${error.message}`, 'streamError');
+            activeStreams.delete(id);
         });
         
         return ffmpeg;
@@ -193,11 +200,10 @@ class StreamManager {
         const stream = activeStreams.get(id);
         if (!stream) return false;
         
-        Logger.log('STOP', `Stopping: ${stream.info.name} (${reason})`, id);
+        Logger.log('🛑 STOP', `Manual stop: ${stream.info.name} (${reason})`, id);
+        TelegramBot.sendAlert(id, `🛑 <b>MANUAL STOP</b>\nStream: ${stream.info.name}\nReason: ${reason}`, 'stoppedStream');
         
-        if (CONFIG.telegram.enabled) {
-            Logger.sendTelegram(`🟡 STOPPED: ${stream.info.name}`, 'stoppedStream');
-        }
+        stream.isRunning = false;
         
         try {
             stream.process.kill('SIGTERM');
@@ -217,164 +223,267 @@ class StreamManager {
         });
         return count;
     }
+    
+    static getStatus() {
+        const status = [];
+        activeStreams.forEach((stream, id) => {
+            const uptime = Math.floor((Date.now() - stream.startTime) / 1000);
+            const mins = Math.floor(uptime / 60);
+            const secs = uptime % 60;
+            status.push({
+                id,
+                name: stream.info.name,
+                uptime: `${mins}m ${secs}s`,
+                running: stream.isRunning,
+                restartCount: stream.restartCount
+            });
+        });
+        return status;
+    }
 }
 
 // ================== API MONITOR ==================
 class APIMonitor {
     static async fetchStreams() {
         try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 10000);
+            
             const response = await fetch(CONFIG.api.url, {
                 headers: {
                     'User-Agent': 'StreamMonitor/1.0',
                     'Accept': 'application/json'
                 },
-                // timeout: 15000 (Node 18+ has built-in timeout)
+                signal: controller.signal
             });
+            
+            clearTimeout(timeout);
             
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}`);
             }
             
             const data = await response.json();
-            
-            // Handle nested structure from your API
             const apiData = data.data || data;
             
             if (!apiData.success) {
                 throw new Error('API returned success: false');
             }
             
-            // Reset error counter on success
-            apiErrorCount = 0;
-            
             return apiData.data || [];
             
         } catch (error) {
-            apiErrorCount++;
-            
-            // Only log every 5th error to avoid spam
-            if (apiErrorCount % 5 === 1) {
-                Logger.log('ERROR', `API error ${apiErrorCount}: ${error.message}`);
-            }
-            
-            // Return empty array to keep existing streams running
+            Logger.log('🌐 API ERROR', `Failed: ${error.message}`);
+            TelegramBot.sendAlert('system', `🌐 <b>API ERROR</b>\n${error.message}`, 'apiError');
             return [];
         }
     }
     
     static async monitor() {
-        const streams = await this.fetchStreams();
-        
-        // If API returns data
-        if (streams.length > 0) {
-            Logger.log('INFO', `API: ${streams.length} streams found`);
+        try {
+            const streams = await this.fetchStreams();
             
-            // Check for new/removed streams
-            const activeIds = new Set(streams.map(s => s.id));
-            const currentIds = new Set(activeStreams.keys());
+            if (streams.length === 0) {
+                Logger.log('ℹ️ INFO', 'API returned 0 streams');
+                
+                // If API returns empty but we have active streams
+                if (activeStreams.size > 0) {
+                    Logger.log('⚠️ WARNING', `API says 0 streams but we have ${activeStreams.size} active`);
+                }
+                return;
+            }
             
-            // Stop streams removed from API
-            currentIds.forEach(id => {
-                if (!activeIds.has(id)) {
-                    Logger.log('NEW', `Removed from API`, id);
+            Logger.log('📡 API', `Found ${streams.length} streams`);
+            
+            // Track current streams
+            const apiStreamIds = new Set();
+            
+            // Process each stream from API
+            for (const stream of streams) {
+                apiStreamIds.add(stream.id);
+                
+                if (stream.status === 'active') {
+                    const isRunning = activeStreams.has(stream.id);
+                    
+                    if (!isRunning) {
+                        // New active stream
+                        Logger.log('🆕 NEW', `Starting: ${stream.name}`, stream.id);
+                        StreamManager.startStream(stream);
+                    } else {
+                        // Stream already running, check if needs update
+                        const runningStream = activeStreams.get(stream.id);
+                        if (runningStream && 
+                            (runningStream.info.rtmps_url !== stream.rtmps_url || 
+                             runningStream.info.rtmp_source !== stream.rtmp_source)) {
+                            Logger.log('🔄 UPDATE', `Restarting ${stream.name} (source changed)`, stream.id);
+                            StreamManager.stopStream(stream.id, "Source updated");
+                            setTimeout(() => StreamManager.startStream(stream), 2000);
+                        }
+                    }
+                } else if (stream.status !== 'active' && activeStreams.has(stream.id)) {
+                    // Stream became inactive
+                    Logger.log('⏸️ INACTIVE', `Stopping: ${stream.name}`, stream.id);
+                    StreamManager.stopStream(stream.id, "Marked inactive");
+                }
+            }
+            
+            // Stop streams not in API anymore
+            activeStreams.forEach((stream, id) => {
+                if (!apiStreamIds.has(id)) {
+                    Logger.log('🗑️ REMOVED', `Stopping: ${stream.info.name} (not in API)`, id);
                     StreamManager.stopStream(id, "Removed from API");
                 }
             });
             
-            // Start new active streams
-            streams.forEach(stream => {
-                if (stream.status === 'active' && !activeStreams.has(stream.id)) {
-                    Logger.log('NEW', `New stream: ${stream.name}`, stream.id);
-                    StreamManager.startStream(stream);
-                }
-            });
-            
-        } else if (streams.length === 0) {
-            // API returned empty array (no streams)
-            Logger.log('INFO', 'API returned 0 streams');
-            
-            // If we have active streams but API says none, stop them
-            if (activeStreams.size > 0) {
-                Logger.log('INFO', 'Stopping all streams (API returned empty)');
-                StreamManager.stopAll();
+            // Show status
+            const activeStatus = StreamManager.getStatus();
+            if (activeStatus.length > 0) {
+                Logger.log('📊 STATUS', `${activeStatus.length} active streams:`);
+                activeStatus.forEach(s => {
+                    Logger.log('   📺', `${s.name} - ${s.uptime} (restarts: ${s.restartCount})`, s.id);
+                });
+            } else {
+                Logger.log('📊 STATUS', 'No active streams');
             }
+            
+        } catch (error) {
+            Logger.log('💥 MONITOR ERROR', error.message);
         }
-        
-        // Show current status
-        Logger.log('STATUS', `Active: ${activeStreams.size} streams`);
     }
 }
 
 // ================== MAIN APPLICATION ==================
 async function main() {
-    console.log('\n' + '='.repeat(50));
-    console.log('📡 STREAM MONITOR STARTING');
+    console.log('\n' + '='.repeat(60));
+    console.log('📡 FACEBOOK STREAM MONITOR');
     console.log(`🌐 API: ${CONFIG.api.url}`);
-    console.log('='.repeat(50) + '\n');
+    console.log(`🤖 Telegram: ${CONFIG.telegram.enabled ? 'Enabled' : 'Disabled'}`);
+    console.log('='.repeat(60));
+    console.log('Starting at:', new Date().toLocaleString());
+    console.log('='.repeat(60) + '\n');
     
-    // Create log file if it doesn't exist
+    // Initialize log file
     try {
-        writeFileSync(CONFIG.logging.logFile, 'Stream Monitor Log\n' + '='.repeat(50) + '\n');
+        writeFileSync('streams.log', '=== STREAM MONITOR LOG ===\n');
+        appendFileSync('streams.log', `Started: ${new Date().toLocaleString()}\n`);
+        appendFileSync('streams.log', '='.repeat(50) + '\n');
     } catch (e) {
-        console.error('Could not create log file:', e.message);
+        console.error('Log init failed:', e.message);
     }
     
-    // Initial Telegram notification
+    // Send startup notification
     if (CONFIG.telegram.enabled) {
-        await Logger.sendTelegram('🚀 Stream Monitor Started', 'newStream');
+        await TelegramBot.sendMessage('🚀 <b>STREAM MONITOR STARTED</b>\n' + 
+                                     `Time: ${new Date().toLocaleString()}\n` +
+                                     `API: ${CONFIG.api.url}`);
     }
     
     // Initial API check
-    Logger.log('INFO', 'Performing initial API check...');
+    Logger.log('🔧 INIT', 'Performing initial API check...');
     await APIMonitor.monitor();
     
     // Start monitoring loop
-    const monitorInterval = setInterval(async () => {
-        try {
-            await APIMonitor.monitor();
-        } catch (error) {
-            console.error('Monitoring error:', error.message);
-        }
-    }, CONFIG.api.pollInterval);
+    let monitorInterval;
+    const startMonitoring = () => {
+        if (monitorInterval) clearInterval(monitorInterval);
+        monitorInterval = setInterval(async () => {
+            try {
+                await APIMonitor.monitor();
+            } catch (error) {
+                Logger.log('💥 INTERVAL ERROR', error.message);
+            }
+        }, CONFIG.api.pollInterval);
+    };
     
-    // Graceful shutdown
-    process.on('SIGINT', () => {
-        clearInterval(monitorInterval);
+    startMonitoring();
+    
+    // Health check: restart monitoring if it stops
+    setInterval(() => {
+        if (!monitorInterval) {
+            Logger.log('⚠️ HEALTH', 'Monitoring stopped, restarting...');
+            startMonitoring();
+        }
+    }, 60000);
+    
+    // Graceful shutdown handler
+    process.on('SIGINT', async () => {
+        console.log('\n' + '🛑'.repeat(30));
+        console.log('GRACEFUL SHUTDOWN INITIATED');
+        console.log('🛑'.repeat(30));
         
-        console.log('\n' + '🛑'.repeat(25));
-        console.log('SHUTDOWN INITIATED');
-        console.log('🛑'.repeat(25));
+        if (monitorInterval) clearInterval(monitorInterval);
         
-        const stopped = StreamManager.stopAll();
+        Logger.log('🔧 SHUTDOWN', 'Stopping all streams...');
         
         if (CONFIG.telegram.enabled) {
-            Logger.sendTelegram(`🛑 Monitor stopped. ${stopped} streams terminated.`);
+            await TelegramBot.sendMessage('🛑 <b>MONITOR SHUTTING DOWN</b>\n' +
+                                         `Active streams: ${activeStreams.size}\n` +
+                                         `Time: ${new Date().toLocaleString()}`);
         }
         
-        console.log(`\n✅ Stopped ${stopped} streams`);
-        console.log('📝 Logs saved to:', CONFIG.logging.logFile);
+        const stoppedCount = StreamManager.stopAll();
+        
+        console.log(`\n✅ Stopped ${stoppedCount} streams`);
+        console.log('📝 Logs saved to: streams.log');
         console.log('\n👋 Goodbye!\n');
+        
+        // Add shutdown to log
+        appendFileSync('streams.log', `\nShutdown: ${new Date().toLocaleString()}\n`);
         
         process.exit(0);
     });
     
-    // Keep running
+    // Keep application running
+    console.log('\n✅ Monitor is running. Press Ctrl+C to stop.\n');
+    
+    // Display status every 5 minutes
+    setInterval(() => {
+        const status = StreamManager.getStatus();
+        console.log('\n' + '📊'.repeat(30));
+        console.log('5-MINUTE STATUS');
+        console.log(`Active streams: ${status.length}`);
+        
+        if (status.length > 0) {
+            status.forEach(s => {
+                console.log(`  ${s.name} - ${s.uptime}`);
+            });
+        } else {
+            console.log('  No active streams');
+        }
+        console.log('📊'.repeat(30) + '\n');
+    }, 300000);
+    
+    // Keep process alive
     while (true) {
-        await setTimeout(60000); // Sleep for 1 minute
+        await new Promise(resolve => setTimeout(resolve, 60000));
     }
 }
 
-// ================== START THE APPLICATION ==================
-// Make sure you have this package.json:
-/*
-{
-  "type": "module",
-  "name": "stream-monitor",
-  "version": "1.0.0"
+// ================== STARTUP ==================
+// Create package.json if it doesn't exist
+try {
+    const fs = await import('fs');
+    if (!fs.existsSync('package.json')) {
+        fs.writeFileSync('package.json', JSON.stringify({
+            "type": "module",
+            "name": "facebook-stream-monitor",
+            "version": "1.0.0"
+        }, null, 2));
+        console.log('✅ Created package.json');
+    }
+} catch (e) {
+    // Continue anyway
 }
-*/
 
+// Start the application
 main().catch(error => {
-    console.error('💥 Fatal error:', error);
+    console.error('\n💥 FATAL STARTUP ERROR:', error);
+    console.error('Stack:', error.stack);
+    
+    if (CONFIG.telegram.enabled) {
+        TelegramBot.sendMessage(`💥 <b>MONITOR CRASHED</b>\nError: ${error.message}\nTime: ${new Date().toLocaleString()}`)
+            .catch(() => {});
+    }
+    
     process.exit(1);
 });
