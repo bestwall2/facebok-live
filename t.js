@@ -32,312 +32,238 @@ const CONFIG = {
     ]
 };
 
-// ================== HELPER FUNCTIONS ==================
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// ================== SIMPLE HELPER ==================
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-function generateStreamId() {
-    return `stream_${Date.now()}_${Math.random().toString(36).substr(2, 5)}`;
-}
-
-// ================== FACEBOOK API FUNCTIONS ==================
-async function createFacebookStream(title) {
-    try {
-        const response = await fetch(
-            `https://graph.facebook.com/${CONFIG.facebook.apiVersion}/${CONFIG.facebook.pageId}/live_videos`,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    title: title,
-                    status: "UNPUBLISHED",  // Important: Keeps stream private
-                    access_token: CONFIG.facebook.accessToken,
-                    description: "Live broadcast"
-                })
-            }
-        );
-
-        const data = await response.json();
-        
-        if (data.error) {
-            throw new Error(`Facebook API Error: ${data.error.message}`);
+// ================== CORE FUNCTIONS ==================
+async function createFacebookStream(name) {
+    const response = await fetch(
+        `https://graph.facebook.com/${CONFIG.facebook.apiVersion}/${CONFIG.facebook.pageId}/live_videos`,
+        {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                title: name,
+                status: "UNPUBLISHED",
+                access_token: CONFIG.facebook.accessToken
+            })
         }
-
-        return {
-            streamId: data.id,
-            rtmpsUrl: data.secure_stream_url,
-            status: "UNPUBLISHED"
-        };
-    } catch (error) {
-        console.error('❌ Failed to create Facebook stream:', error.message);
-        throw error;
-    }
+    );
+    return await response.json();
 }
 
-async function getDashPreviewUrl(streamId) {
-    try {
-        const response = await fetch(
-            `https://graph.facebook.com/${CONFIG.facebook.apiVersion}/${streamId}?fields=dash_preview_url,status&access_token=${CONFIG.facebook.accessToken}`
-        );
-
-        const data = await response.json();
-        
-        if (data.error) {
-            console.warn(`⚠️ Could not get DASH URL for ${streamId}: ${data.error.message}`);
-            return null;
-        }
-
-        return data.dash_preview_url;
-    } catch (error) {
-        console.error(`❌ Error fetching DASH URL:`, error.message);
-        return null;
-    }
+async function getDashUrl(streamId) {
+    const response = await fetch(
+        `https://graph.facebook.com/v24.0/${streamId}?fields=dash_preview_url&access_token=${CONFIG.facebook.accessToken}`
+    );
+    const data = await response.json();
+    return data.dash_preview_url;
 }
 
-// ================== FFMPEG STREAMER ==================
-function startFFmpegStream(inputUrl, rtmpsUrl, streamKey, title) {
-    console.log(`🚀 Starting FFmpeg for: ${title}`);
+function startFFmpeg(inputUrl, rtmpsUrl, streamKey, name) {
+    console.log(`🚀 [${streamKey}] Starting FFmpeg for "${name}"`);
+    console.log(`   📥 Input: ${inputUrl}`);
+    console.log(`   📤 Output: ${rtmpsUrl.substring(0, 50)}...`);
     
-    const args = [
-        "-re",
-        "-i", inputUrl,
-        "-map", "0:v:0",
-        "-map", "0:a:0",
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-pix_fmt", "yuv420p",
-        "-r", "25",
-        "-g", "50",
-        "-b:v", "3000k",
-        "-maxrate", "3000k",
-        "-bufsize", "6000k",
-        "-c:a", "aac",
-        "-ar", "44100", 
-        "-b:a", "128k",
-        "-ac", "2",
+    const ffmpeg = spawn("ffmpeg", [
+        "-re", "-i", inputUrl,
+        "-map", "0:v:0", "-map", "0:a:0",
+        "-c:v", "libx264", "-preset", "ultrafast", // Using ultrafast for lower CPU
+        "-pix_fmt", "yuv420p", "-r", "25", "-g", "50",
+        "-b:v", "2000k", "-maxrate", "2000k", "-bufsize", "4000k", // Lower bitrate
+        "-c:a", "aac", "-ar", "44100", "-b:a", "96k", "-ac", "2",
         "-f", "flv",
         rtmpsUrl
-    ];
+    ]);
 
-    const ffmpeg = spawn("ffmpeg", args);
-
-    // Log FFmpeg status
+    // CRITICAL: Log ALL FFmpeg output to debug issues
     ffmpeg.stderr.on('data', (data) => {
-        const message = data.toString();
-        if (message.includes('frame=') && Math.random() < 0.1) {
-            console.log(`📊 [${streamKey}] ${message.substring(0, 60)}...`);
+        const msg = data.toString();
+        if (msg.includes('error') || msg.includes('fail') || msg.includes('Invalid')) {
+            console.error(`🔥 [${streamKey}] FFmpeg ERROR: ${msg.trim()}`);
+        } else if (msg.includes('frame=')) {
+            // Log progress every 100 frames
+            if (Math.random() < 0.3) {
+                const match = msg.match(/frame=\s*(\d+).*time=([\d:.]+)/);
+                if (match) console.log(`📊 [${streamKey}] Frame: ${match[1]}, Time: ${match[2]}`);
+            }
         }
     });
 
     ffmpeg.on('close', (code) => {
-        console.log(`🔴 FFmpeg for ${streamKey} exited with code ${code}`);
+        console.log(`🔴 [${streamKey}] FFmpeg exited with code ${code}`);
     });
 
     ffmpeg.on('error', (err) => {
-        console.error(`🔥 FFmpeg error for ${streamKey}:`, err.message);
+        console.error(`💥 [${streamKey}] FFmpeg process error: ${err.message}`);
     });
 
     return ffmpeg;
 }
 
-// ================== STREAM MANAGER ==================
-class MultiStreamManager {
-    constructor() {
-        this.activeStreams = new Map(); // key -> {streamInfo, ffmpegProcess, dashUrl}
-    }
+// ================== MAIN STREAM MANAGER ==================
+async function startAllStreams() {
+    console.log('\n' + '='.repeat(60));
+    console.log('STARTING MULTIPLE FACEBOOK LIVE STREAMS');
+    console.log('='.repeat(60) + '\n');
 
-    async startStream(streamConfig) {
-        const streamKey = streamConfig.key || generateStreamId();
+    const streams = [];
+    
+    for (const config of CONFIG.streams) {
+        console.log(`\n▶️  Setting up: ${config.name} (${config.key})`);
         
-        console.log(`\n${'='.repeat(50)}`);
-        console.log(`🎬 STARTING STREAM: ${streamConfig.name}`);
-        console.log(`${'='.repeat(50)}`);
-
         try {
-            // 1. Create Facebook Live stream
-            const facebookStream = await createFacebookStream(streamConfig.name);
+            // Step 1: Create Facebook stream
+            console.log(`   📡 Creating Facebook Live...`);
+            const fbStream = await createFacebookStream(config.name);
             
-            if (!facebookStream.rtmpsUrl) {
-                throw new Error('No RTMPS URL received from Facebook');
+            if (fbStream.error) {
+                console.error(`   ❌ Facebook error: ${fbStream.error.message}`);
+                continue; // Skip to next stream
             }
-
-            // 2. Start FFmpeg
-            const ffmpegProcess = startFFmpegStream(
-                streamConfig.inputUrl,
-                facebookStream.rtmpsUrl,
-                streamKey,
-                streamConfig.name
+            
+            console.log(`   ✅ Created stream ID: ${fbStream.id}`);
+            console.log(`   🔗 RTMPS URL: ${fbStream.secure_stream_url.substring(0, 60)}...`);
+            
+            // Step 2: Start FFmpeg
+            const ffmpegProcess = startFFmpeg(
+                config.inputUrl,
+                fbStream.secure_stream_url,
+                config.key,
+                config.name
             );
-
-            // 3. Store stream info
+            
+            // Step 3: Wait for stream to initialize
+            console.log(`   ⏳ Waiting 15 seconds for stream to start...`);
+            await sleep(15000);
+            
+            // Step 4: Get DASH URL
+            console.log(`   📥 Fetching DASH preview URL...`);
+            const dashUrl = await getDashUrl(fbStream.id);
+            
             const streamInfo = {
-                key: streamKey,
-                name: streamConfig.name,
-                facebookId: facebookStream.streamId,
-                rtmpsUrl: facebookStream.rtmpsUrl,
-                inputUrl: streamConfig.inputUrl,
+                key: config.key,
+                name: config.name,
+                facebookId: fbStream.id,
+                dashUrl: dashUrl || 'Not available yet',
                 ffmpegProcess: ffmpegProcess,
-                dashUrl: null,
-                startTime: new Date()
+                running: true
             };
-
-            this.activeStreams.set(streamKey, streamInfo);
             
-            console.log(`✅ Facebook Live created: ${facebookStream.streamId}`);
-            console.log(`📺 Streaming from: ${streamConfig.inputUrl}`);
-
-            // 4. Wait and get DASH URL
-            console.log(`⏳ Waiting for DASH preview URL...`);
-            await sleep(10000); // Wait 10 seconds for stream to initialize
+            streams.push(streamInfo);
             
-            const dashUrl = await getDashPreviewUrl(facebookStream.streamId);
+            // Step 5: Display DASH URL
+            console.log(`\n   🎉 DASH PREVIEW URL FOR "${config.name}":`);
+            console.log(`   🔗 ${dashUrl || 'Will retry in next poll...'}`);
+            console.log('   '.padEnd(60, '-'));
             
-            if (dashUrl) {
-                streamInfo.dashUrl = dashUrl;
-                console.log(`\n🎉 DASH PREVIEW URL FOR "${streamConfig.name}":`);
-                console.log(`🔗 ${dashUrl}`);
-                console.log(`📋 Copy this URL into a DASH player (like dash.js) to preview`);
-            } else {
-                console.warn(`⚠️ DASH URL not available yet for ${streamConfig.name}`);
+            // Delay between starting streams
+            if (config !== CONFIG.streams[CONFIG.streams.length - 1]) {
+                console.log(`\n⏸️  Waiting 5 seconds before next stream...\n`);
+                await sleep(5000);
             }
-
-            return streamInfo;
-
+            
         } catch (error) {
-            console.error(`❌ Failed to start stream ${streamConfig.name}:`, error.message);
-            throw error;
+            console.error(`   ❌ Failed to setup ${config.name}: ${error.message}`);
         }
     }
+    
+    return streams;
+}
 
-    async startAllStreams() {
-        console.log(`\n${'🚀'.repeat(20)}`);
-        console.log(`STARTING ${CONFIG.streams.length} STREAMS`);
-        console.log(`${'🚀'.repeat(20)}\n`);
-
-        const results = [];
+// ================== MONITORING & DISPLAY ==================
+function showDashboard(streams) {
+    console.log('\n' + '📊'.repeat(25));
+    console.log('STREAM DASHBOARD');
+    console.log('📊'.repeat(25));
+    
+    if (streams.length === 0) {
+        console.log('No active streams');
+        return;
+    }
+    
+    streams.forEach((stream, index) => {
+        console.log(`\n${index + 1}. 📺 ${stream.name} [${stream.key}]`);
+        console.log(`   🆔 Facebook ID: ${stream.facebookId}`);
+        console.log(`   🎥 FFmpeg: ${stream.running ? '✅ RUNNING' : '❌ STOPPED'}`);
+        console.log(`   🔗 DASH URL: ${stream.dashUrl ? '✅ AVAILABLE' : '⏳ PENDING'}`);
         
-        for (const streamConfig of CONFIG.streams) {
-            try {
-                const streamInfo = await this.startStream(streamConfig);
-                results.push(streamInfo);
-                
-                // Delay between starting streams
-                if (streamConfig !== CONFIG.streams[CONFIG.streams.length - 1]) {
-                    await sleep(3000);
+        if (stream.dashUrl && stream.dashUrl !== 'Not available yet') {
+            console.log(`   📋 ${stream.dashUrl.substring(0, 70)}...`);
+        }
+    });
+}
+
+async function monitorStreams(streams) {
+    console.log('\n' + '🔄'.repeat(25));
+    console.log('STARTING MONITORING (updates every 30 seconds)');
+    console.log('🔄'.repeat(25));
+    
+    // Monitor loop
+    const interval = setInterval(async () => {
+        console.log(`\n🕒 ${new Date().toLocaleTimeString()} - Checking streams...`);
+        
+        for (const stream of streams) {
+            // Check if FFmpeg is still running
+            stream.running = stream.ffmpegProcess.exitCode === null;
+            
+            // Try to get DASH URL if we don't have it yet
+            if (!stream.dashUrl || stream.dashUrl === 'Not available yet') {
+                const dashUrl = await getDashUrl(stream.facebookId);
+                if (dashUrl) {
+                    stream.dashUrl = dashUrl;
+                    console.log(`\n🎉 NEW DASH URL FOR "${stream.name}":`);
+                    console.log(`🔗 ${dashUrl}`);
                 }
-                
-            } catch (error) {
-                console.error(`Failed to start ${streamConfig.name}:`, error.message);
-                results.push({ error: error.message, config: streamConfig });
             }
         }
-
-        return results;
-    }
-
-    getDashboard() {
-        console.log(`\n${'📊'.repeat(20)}`);
-        console.log(`ACTIVE STREAMS DASHBOARD`);
-        console.log(`${'📊'.repeat(20)}`);
-
-        if (this.activeStreams.size === 0) {
-            console.log('No active streams.');
-            return;
-        }
-
-        this.activeStreams.forEach((info, key) => {
-            console.log(`\n📺 ${info.name} [${key}]`);
-            console.log(`   🆔 Facebook ID: ${info.facebookId}`);
-            console.log(`   🕐 Started: ${info.startTime.toLocaleTimeString()}`);
-            console.log(`   🔗 DASH URL: ${info.dashUrl ? '✅ Available' : '⏳ Pending'}`);
-            
-            if (info.dashUrl) {
-                console.log(`   📋 Preview: ${info.dashUrl.substring(0, 80)}...`);
-            }
-            
-            const isRunning = info.ffmpegProcess?.exitCode === null;
-            console.log(`   🎥 FFmpeg: ${isRunning ? '✅ Running' : '❌ Stopped'}`);
-        });
-    }
-
-    async shutdown() {
-        console.log(`\n${'🔴'.repeat(20)}`);
-        console.log(`SHUTTING DOWN ALL STREAMS`);
         
-        this.activeStreams.forEach((info, key) => {
-            if (info.ffmpegProcess) {
-                info.ffmpegProcess.kill('SIGTERM');
-                console.log(`🛑 Stopped ${info.name}`);
-            }
-        });
+        showDashboard(streams);
+        console.log('\nPress Ctrl+C to stop all streams and exit');
         
-        this.activeStreams.clear();
-        console.log(`✅ All streams stopped.`);
-    }
+    }, 30000); // Check every 30 seconds
+    
+    return interval;
 }
 
 // ================== MAIN APPLICATION ==================
 async function main() {
-    console.log(`
-    ╔═══════════════════════════════════════════════╗
-    ║    MULTI-STREAM FACEBOOK LIVE MANAGER         ║
-    ║    Simple Single-File Solution                ║
-    ╚═══════════════════════════════════════════════╝
-    `);
-
-    const manager = new MultiStreamManager();
-
-    try {
-        // Start all streams
-        await manager.startAllStreams();
+    console.log('🚀 Multi-Stream Facebook Live Manager\n');
+    
+    // Step 1: Start all streams
+    const streams = await startAllStreams();
+    
+    // Step 2: Initial dashboard
+    showDashboard(streams);
+    
+    // Step 3: Start monitoring
+    const monitorInterval = await monitorStreams(streams);
+    
+    // Step 4: Graceful shutdown
+    process.on('SIGINT', () => {
+        console.log('\n\n' + '🛑'.repeat(25));
+        console.log('SHUTTING DOWN ALL STREAMS');
+        console.log('🛑'.repeat(25));
         
-        // Show dashboard
-        console.log(`\n${'✅'.repeat(20)}`);
-        console.log(`ALL STREAMS INITIALIZED`);
-        console.log(`Waiting for DASH URLs...\n`);
+        clearInterval(monitorInterval);
         
-        // Initial dashboard
-        manager.getDashboard();
-        
-        // Poll for DASH URLs every 30 seconds
-        const pollInterval = setInterval(async () => {
-            console.log(`\n🔄 Polling for DASH URLs...`);
-            
-            for (const [key, info] of manager.activeStreams) {
-                if (!info.dashUrl) {
-                    const dashUrl = await getDashPreviewUrl(info.facebookId);
-                    if (dashUrl) {
-                        info.dashUrl = dashUrl;
-                        console.log(`\n🎉 NEW DASH URL FOR "${info.name}":`);
-                        console.log(`🔗 ${dashUrl}`);
-                    }
-                }
+        streams.forEach(stream => {
+            if (stream.ffmpegProcess && stream.running) {
+                console.log(`🛑 Stopping ${stream.name}...`);
+                stream.ffmpegProcess.kill('SIGTERM');
             }
-            
-            manager.getDashboard();
-        }, 30000);
-
-        // Keep application running
-        console.log(`\n📱 Application running. Press Ctrl+C to exit.\n`);
-        
-        process.on('SIGINT', async () => {
-            clearInterval(pollInterval);
-            console.log(`\n📴 Received shutdown signal...`);
-            await manager.shutdown();
-            process.exit(0);
         });
-
-        // Keep process alive
-        await new Promise(() => {});
-
-    } catch (error) {
-        console.error(`❌ Application error:`, error);
-        await manager.shutdown();
-        process.exit(1);
-    }
+        
+        console.log('✅ All streams stopped. Goodbye!\n');
+        process.exit(0);
+    });
+    
+    // Keep the application running
+    await new Promise(() => {});
 }
 
-// ================== RUN APPLICATION ==================
-if (import.meta.url === `file://${process.argv[1]}`) {
-    // Install dependencies first: npm install node-fetch
-    main().catch(console.error);
-}
+// ================== RUN THE APPLICATION ==================
+main().catch(error => {
+    console.error('💥 FATAL ERROR:', error);
+    process.exit(1);
+});
