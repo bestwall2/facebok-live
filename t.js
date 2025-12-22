@@ -1,32 +1,34 @@
+// ================== IMPORTS ==================
 import { spawn } from 'child_process';
+import { writeFileSync, appendFileSync } from 'fs';
+import { setTimeout } from 'timers/promises';
 
-import fs from 'fs';
 // ================== CONFIGURATION ==================
 const CONFIG = {
     api: {
         url: "https://ani-box-nine.vercel.app/api/grok-chat",
         pollInterval: 30000,  // Check every 30 seconds
-        retryDelay: 10000     // Retry after 10 seconds on failure
+        retryDelay: 10000
     },
-    telegram: {       
-    botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",  // Get from @BotFather
-    chatId: "5806630118",
-        enabled: false,  // Set to true when you configure Telegram
+    telegram: {
+        botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",  // Get from @BotFather
+        chatId: "5806630118",
+        enabled: false,
         alerts: {
             newStream: true,
             stoppedStream: true,
             streamError: true,
-            apiError: false  // Don't spam on API errors
+            apiError: false
         }
     },
     logging: {
         logFile: "streams.log",
-        statusReportInterval: 300000  // 5 minutes
+        statusReportInterval: 300000
     }
 };
 
 // ================== GLOBAL STATE ==================
-let activeStreams = new Map();  // id -> {process, info, startTime}
+let activeStreams = new Map();
 let lastStatusReport = Date.now();
 let apiErrorCount = 0;
 
@@ -42,20 +44,22 @@ class Logger {
         
         if (showInConsole) {
             const colors = {
-                'START': '\x1b[32m',  // Green
-                'STOP': '\x1b[33m',   // Yellow
-                'NEW': '\x1b[36m',    // Cyan
-                'ERROR': '\x1b[31m',  // Red
-                'STATUS': '\x1b[35m', // Magenta
-                'INFO': '\x1b[90m'    // Gray
+                'START': '\x1b[32m',
+                'STOP': '\x1b[33m',
+                'NEW': '\x1b[36m',
+                'ERROR': '\x1b[31m',
+                'STATUS': '\x1b[35m',
+                'INFO': '\x1b[90m'
             };
             console.log(`${colors[level] || ''}${logEntry}\x1b[0m`);
         }
         
         // File logging
         try {
-            require('fs').appendFileSync(CONFIG.logging.logFile, logEntry + '\n');
-        } catch (e) {}
+            appendFileSync(CONFIG.logging.logFile, logEntry + '\n');
+        } catch (e) {
+            console.error('Log file error:', e.message);
+        }
         
         // 5-minute status report
         const now = Date.now();
@@ -116,13 +120,16 @@ class StreamManager {
         const { id, name, rtmps_url, rtmp_source } = streamInfo;
         
         Logger.log('START', `Starting: ${name}`, id);
-        Logger.sendTelegram(`🟢 STARTING: ${name}`, 'newStream');
+        
+        if (CONFIG.telegram.enabled) {
+            Logger.sendTelegram(`🟢 STARTING: ${name}`, 'newStream');
+        }
         
         // Simple FFmpeg command
-        const ffmpeg = require('child_process').spawn("ffmpeg", [
+        const ffmpeg = spawn("ffmpeg", [
             "-re",
             "-i", rtmp_source,
-            "-c", "copy",          // No re-encoding if possible
+            "-c", "copy",
             "-f", "flv",
             rtmps_url
         ]);
@@ -150,7 +157,9 @@ class StreamManager {
             if (msg.includes('error') || msg.includes('fail') || msg.includes('Invalid')) {
                 const errorMsg = msg.substring(0, 100);
                 Logger.log('ERROR', `FFmpeg: ${errorMsg}`, id);
-                Logger.sendTelegram(`🔴 ERROR in ${name}: ${errorMsg}`, 'streamError');
+                if (CONFIG.telegram.enabled) {
+                    Logger.sendTelegram(`🔴 ERROR in ${name}: ${errorMsg}`, 'streamError');
+                }
             }
             
             // Show progress (occasionally)
@@ -185,7 +194,10 @@ class StreamManager {
         if (!stream) return false;
         
         Logger.log('STOP', `Stopping: ${stream.info.name} (${reason})`, id);
-        Logger.sendTelegram(`🟡 STOPPED: ${stream.info.name}`, 'stoppedStream');
+        
+        if (CONFIG.telegram.enabled) {
+            Logger.sendTelegram(`🟡 STOPPED: ${stream.info.name}`, 'stoppedStream');
+        }
         
         try {
             stream.process.kill('SIGTERM');
@@ -216,7 +228,7 @@ class APIMonitor {
                     'User-Agent': 'StreamMonitor/1.0',
                     'Accept': 'application/json'
                 },
-                timeout: 15000
+                // timeout: 15000 (Node 18+ has built-in timeout)
             });
             
             if (!response.ok) {
@@ -300,6 +312,13 @@ async function main() {
     console.log(`🌐 API: ${CONFIG.api.url}`);
     console.log('='.repeat(50) + '\n');
     
+    // Create log file if it doesn't exist
+    try {
+        writeFileSync(CONFIG.logging.logFile, 'Stream Monitor Log\n' + '='.repeat(50) + '\n');
+    } catch (e) {
+        console.error('Could not create log file:', e.message);
+    }
+    
     // Initial Telegram notification
     if (CONFIG.telegram.enabled) {
         await Logger.sendTelegram('🚀 Stream Monitor Started', 'newStream');
@@ -311,7 +330,11 @@ async function main() {
     
     // Start monitoring loop
     const monitorInterval = setInterval(async () => {
-        await APIMonitor.monitor();
+        try {
+            await APIMonitor.monitor();
+        } catch (error) {
+            console.error('Monitoring error:', error.message);
+        }
     }, CONFIG.api.pollInterval);
     
     // Graceful shutdown
@@ -336,20 +359,21 @@ async function main() {
     });
     
     // Keep running
-    await new Promise(() => {});
+    while (true) {
+        await setTimeout(60000); // Sleep for 1 minute
+    }
 }
 
-// ================== QUICK START ==================
-// 1. Create package.json with "type": "module"
-// 2. Run: node stream-monitor.js
-
-// Check if fetch is available (Node 18+)
-if (typeof fetch === 'undefined') {
-    console.log('⚠️ Node.js 18+ required (or install node-fetch)');
-    process.exit(1);
+// ================== START THE APPLICATION ==================
+// Make sure you have this package.json:
+/*
+{
+  "type": "module",
+  "name": "stream-monitor",
+  "version": "1.0.0"
 }
+*/
 
-// Start the application
 main().catch(error => {
     console.error('💥 Fatal error:', error);
     process.exit(1);
