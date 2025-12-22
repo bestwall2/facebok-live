@@ -97,10 +97,7 @@ class StreamManager {
         
         // Convert RTMPS to RTMP (Facebook accepts RTMP)
         let streamUrl = rtmps_url;
-        if (streamUrl.startsWith('rtmps://')) {
-            streamUrl = streamUrl.replace('rtmps://', 'rtmp://');
-            Logger.log('ℹ️ INFO', `Converted RTMPS to RTMP`, id);
-        }
+       
         
         // Robust FFmpeg command with encoding
         const ffmpeg = spawn("ffmpeg", [
