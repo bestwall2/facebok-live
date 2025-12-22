@@ -47,36 +47,11 @@ class Logger {
 
 // ================== FACEBOOK API MANAGER ==================
 class FacebookAPI {
-    static async getPageId(accessToken) {
-        try {
-            const response = await fetch('https://graph.facebook.com/v24.0/me/accounts', {
-                headers: { 'Authorization': `Bearer ${accessToken}` }
-            });
-            
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            }
-            
-            const data = await response.json();
-            
-            if (!data.data || data.data.length === 0) {
-                throw new Error('No Facebook pages found for this token');
-            }
-            
-            // Return the first page ID (you might want to handle multiple pages)
-            return data.data[0].id;
-            
-        } catch (error) {
-            Logger.error(`Failed to get page ID: ${error.message}`);
-            return null;
-        }
-    }
-    
-    static async createLiveStream(accessToken, pageId, streamName) {
+    static async createLiveStream(accessToken,  streamName) {
         for (let attempt = 1; attempt <= CONFIG.maxRetries; attempt++) {
             try {
                 const response = await fetch(
-                    `https://graph.facebook.com/v24.0/${pageId}/live_videos`,
+                    `https://graph.facebook.com/v24.0/me/live_videos`,
                     {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
@@ -344,26 +319,17 @@ static async fetchItemsList() {
             try {
                 Logger.info(`Processing: ${item.name}`, itemId);
                 
-                // 1. Get Page ID using token
-                if (!item.pageId) {
-                    item.pageId = await FacebookAPI.getPageId(item.token);
-                    if (!item.pageId) {
-                        Logger.error(`Skipping ${item.name} - No page ID`, itemId);
-                        continue;
-                    }
-                    Logger.success(`Got page ID: ${item.pageId}`, itemId);
-                }
                 
                 // 2. Create Facebook Live stream
                 if (!item.rtmpsUrl) {
                     const liveStream = await FacebookAPI.createLiveStream(
-                        item.token,
-                        item.pageId,
+                        item.token,                      
                         item.name
                     );
                     
                     item.rtmpsUrl = liveStream.rtmpsUrl;
                     item.streamId = liveStream.streamId;
+                  
                     Logger.success(`Created live stream: ${item.streamId}`, itemId);
                     
                     // 3. Get DASH URL
