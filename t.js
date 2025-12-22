@@ -1,203 +1,205 @@
 import { spawn } from 'child_process';
 import fetch from 'node-fetch';
+import readline from 'readline';
 
-/**
- * SIMPLE MULTI-STREAM FACEBOOK LIVE MANAGER
- * Creates multiple unpublished Facebook Live streams
- * Each with its own DASH preview URL
- */
+// ================== SETUP USER INPUT ==================
+const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout
+});
 
-// ================== CONFIGURATION ==================
-const CONFIG = {
-    // Your Facebook credentials
-    facebook: {
-        pageId: "285026604702057",           // Replace with your Facebook Page ID
-        accessToken: "EAATr298atI4BQfoFhBrpyYS62wZBh4H31p7PWJgn6CHcaP8JfsdfD5dcUmlYX1JbjwVdfDSWN4KjoVT2uulhEZAStwQdbfylZB1Pr7asqMg7FCAVa6lFrAPZCOyGLvrsAxahV8uo4B1LvyBIGAQ6FZAy5ERZAIM38L4QlML9oJbaVolC6voc2TmAhtLxgZCILPo70tDtRqi", // Replace with your Page Access Token
-        apiVersion: "v24.0"
-    },
-    
-    // Stream configurations - ADD YOUR STREAMS HERE
-    streams: [
-        {
-            name: "Sports Channel 1",
-            inputUrl: "https://live-hls-web-aja.getaj.net/AJA/index.m3u8",
-            key: "sports1"
-        },
-        {
-            name: "Sports Channel 2", 
-            inputUrl: "http://dhoomtv.xyz/8zpo3GsVY7/beneficial2concern/274160", // Your second stream
-            key: "sports2"
-        }
-        // Add more streams as needed...
-    ]
+const askQuestion = (question) => {
+    return new Promise((resolve) => {
+        rl.question(question, (answer) => {
+            resolve(answer.trim());
+        });
+    });
 };
-
-// ================== SIMPLE HELPER ==================
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-// ================== FIXED FFMPEG FUNCTION ==================
-function startFFmpeg(inputUrl, rtmpsUrl, streamKey, name) {
-    console.log(`🚀 [${streamKey}] Starting FFmpeg for "${name}"`);
-    
-    // TRY BOTH: First RTMPS, if fails try RTMP
-    const args = [
-        "-re", 
-        "-i", inputUrl,
-        "-map", "0:v:0", 
-        "-map", "0:a:0",
-        "-c:v", "libx264", 
-        "-preset", "ultrafast",
-        "-pix_fmt", "yuv420p", 
-        "-r", "25", 
-        "-g", "50",
-        "-b:v", "2000k", 
-        "-maxrate", "2000k", 
-        "-bufsize", "4000k",
-        "-c:a", "aac", 
-        "-ar", "44100", 
-        "-b:a", "96k", 
-        "-ac", "2",
-        "-f", "flv"
-    ];
-    
-    // Try RTMP first (more reliable)
-    const rtmpUrl = rtmpsUrl.replace('rtmps://', 'rtmp://');
-    args.push(rtmpUrl);
-    
-    console.log(`   📤 Using: ${rtmpUrl.substring(0, 60)}...`);
-    
-    const ffmpeg = spawn("ffmpeg", args);
-
-    // Detailed logging
-    ffmpeg.stderr.on('data', (data) => {
-        const msg = data.toString();
-        if (msg.includes('Opening')) console.log(`   🔓 ${msg.substring(0, 80)}...`);
-        if (msg.includes('frame=')) console.log(`   📊 ${msg.match(/frame=\s*\d+/)[0]}`);
-        if (msg.includes('error') || msg.includes('fail')) {
-            console.error(`   🔥 ERROR: ${msg.substring(0, 100)}`);
-        }
-    });
-
-    ffmpeg.on('close', (code) => {
-        console.log(`   🔴 FFmpeg exited with code ${code}`);
-        if (code !== 0) {
-            console.log(`   💡 Tip: Try running this manually to debug:`);
-            console.log(`   ffmpeg -re -i "${inputUrl}" -c copy -f flv "${rtmpUrl.substring(0, 80)}..."`);
-        }
-    });
-
-    return ffmpeg;
-}
-
-// ================== MAIN STREAM FUNCTION ==================
-async function createAndStream(config) {
-    console.log(`\n🎬 Setting up: ${config.name}`);
-    
-    try {
-        // 1. Create Facebook stream
-        console.log(`   📡 Creating Facebook Live...`);
-        const response = await fetch(
-            `https://graph.facebook.com/${CONFIG.facebook.apiVersion}/${CONFIG.facebook.pageId}/live_videos`,
-            {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    title: config.name,
-                    status: "UNPUBLISHED",
-                    access_token: CONFIG.facebook.accessToken
-                })
-            }
-        );
-        
-        const fbStream = await response.json();
-        
-        if (fbStream.error) {
-            console.error(`   ❌ Facebook API error: ${fbStream.error.message}`);
-            return null;
-        }
-        
-        console.log(`   ✅ Stream ID: ${fbStream.id}`);
-        console.log(`   🔗 RTMPS URL: ${fbStream.secure_stream_url.substring(0, 60)}...`);
-        
-        // 2. Start FFmpeg
-        const ffmpegProcess = startFFmpeg(
-            config.inputUrl,
-            fbStream.secure_stream_url,
-            config.key,
-            config.name
-        );
-        
-        // 3. Get DASH URL after delay
-        await new Promise(resolve => setTimeout(resolve, 10000));
-        
-        const dashResponse = await fetch(
-            `https://graph.facebook.com/v24.0/${fbStream.id}?fields=dash_preview_url&access_token=${CONFIG.facebook.accessToken}`
-        );
-        const dashData = await dashResponse.json();
-        
-        return {
-            key: config.key,
-            name: config.name,
-            facebookId: fbStream.id,
-            dashUrl: dashData.dash_preview_url,
-            ffmpegProcess: ffmpegProcess
-        };
-        
-    } catch (error) {
-        console.error(`   ❌ Setup failed: ${error.message}`);
-        return null;
-    }
-}
 
 // ================== MAIN APPLICATION ==================
 async function main() {
-    console.log('🚀 Facebook Multi-Stream Manager');
-    console.log('='.repeat(50));
+    console.log('\n' + '='.repeat(60));
+    console.log('🚀 MULTI-STREAM FFMPEG BROADCASTER');
+    console.log('='.repeat(60) + '\n');
+
+    // Ask how many streams
+    const streamCount = parseInt(await askQuestion('📊 How many streams do you want to launch? '));
     
+    if (isNaN(streamCount) || streamCount < 1) {
+        console.log('❌ Please enter a valid number (1 or more)');
+        rl.close();
+        return;
+    }
+
+    const streams = [];
+
+    // Collect stream information
+    console.log('\n' + '📝'.repeat(20));
+    console.log('ENTER STREAM DETAILS');
+    console.log('📝'.repeat(20) + '\n');
+
+    for (let i = 1; i <= streamCount; i++) {
+        console.log(`\n📺 STREAM ${i}/${streamCount}:`);
+        
+        const name = await askQuestion(`   Enter stream name: `);
+        const rtmpsUrl = await askQuestion(`   Enter RTMPS URL: `);
+        const streamUrl = await askQuestion(`   Enter source stream URL (M3U8/MP4/etc): `);
+        
+        streams.push({
+            id: i,
+            name: name || `Stream ${i}`,
+            rtmpsUrl: rtmpsUrl,
+            streamUrl: streamUrl,
+            ffmpegProcess: null,
+            status: 'READY'
+        });
+
+        console.log(`   ✅ Stream ${i} configured!`);
+    }
+
+    rl.close();
+
+    console.log('\n' + '🚀'.repeat(20));
+    console.log('STARTING ALL STREAMS');
+    console.log('🚀'.repeat(20) + '\n');
+
+    // Start all streams
     const activeStreams = [];
-    
-    for (const config of CONFIG.streams) {
-        const stream = await createAndStream(config);
-        if (stream) {
+
+    for (const stream of streams) {
+        try {
+            console.log(`\n🎬 Launching: ${stream.name}`);
+            console.log(`   📤 Destination: ${stream.rtmpsUrl.substring(0, 70)}...`);
+            console.log(`   📥 Source: ${stream.streamUrl}`);
+
+            const ffmpegProcess = startFFmpegStream(
+                stream.streamUrl,
+                stream.rtmpsUrl,
+                stream.id,
+                stream.name
+            );
+
+            stream.ffmpegProcess = ffmpegProcess;
+            stream.status = 'RUNNING';
             activeStreams.push(stream);
+
+            console.log(`   ✅ Stream started successfully!`);
             
-            console.log(`\n🎉 DASH URL FOR "${stream.name}":`);
-            console.log(`🔗 ${stream.dashUrl}`);
-            console.log('='.repeat(50));
-            
-            // Wait between streams
-            if (config !== CONFIG.streams[CONFIG.streams.length - 1]) {
-                console.log('\n⏸️  Waiting 3 seconds...\n');
-                await new Promise(r => setTimeout(r, 3000));
+            // Small delay between starting streams
+            if (stream.id < streamCount) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
             }
+
+        } catch (error) {
+            console.error(`   ❌ Failed to start ${stream.name}: ${error.message}`);
+            stream.status = 'FAILED';
         }
     }
-    
-    // Monitor streams
-    console.log('\n📊 ACTIVE STREAMS:');
-    activeStreams.forEach(s => {
-        console.log(`\n📺 ${s.name}`);
-        console.log(`   🆔 ${s.facebookId}`);
-        console.log(`   🔗 ${s.dashUrl.substring(0, 70)}...`);
-        console.log(`   🎥 FFmpeg: ${s.ffmpegProcess.exitCode === null ? '✅ RUNNING' : '❌ STOPPED'}`);
+
+    // Display final status
+    console.log('\n' + '📊'.repeat(20));
+    console.log('STREAM STATUS DASHBOARD');
+    console.log('📊'.repeat(20));
+
+    activeStreams.forEach(stream => {
+        console.log(`\n${stream.id}. 📺 ${stream.name}`);
+        console.log(`   🎥 Status: ${stream.status}`);
+        console.log(`   📤 RTMPS: ${stream.rtmpsUrl.substring(0, 50)}...`);
+        console.log(`   📥 Source: ${stream.streamUrl.substring(0, 50)}...`);
     });
-    
-    console.log('\n🔄 Monitoring streams... Press Ctrl+C to stop\n');
-    
-    // Keep running
+
+    console.log('\n' + '🔄'.repeat(20));
+    console.log('ALL STREAMS ARE NOW RUNNING');
+    console.log('Press Ctrl+C to stop all streams');
+    console.log('🔄'.repeat(20) + '\n');
+
+    // Monitor streams
+    const monitorInterval = setInterval(() => {
+        console.log(`\n🕒 ${new Date().toLocaleTimeString()} - Stream Status:`);
+        
+        activeStreams.forEach(stream => {
+            const isRunning = stream.ffmpegProcess?.exitCode === null;
+            stream.status = isRunning ? 'RUNNING' : 'STOPPED';
+            
+            console.log(`   ${stream.id}. ${stream.name}: ${isRunning ? '✅' : '❌'} ${stream.status}`);
+        });
+        
+        console.log('\nPress Ctrl+C to exit');
+    }, 30000);
+
+    // Graceful shutdown
     process.on('SIGINT', () => {
-        console.log('\n🛑 Stopping all streams...');
-        activeStreams.forEach(s => {
-            if (s.ffmpegProcess.exitCode === null) {
-                s.ffmpegProcess.kill('SIGTERM');
-                console.log(`   Stopped ${s.name}`);
+        clearInterval(monitorInterval);
+        
+        console.log('\n' + '🛑'.repeat(20));
+        console.log('STOPPING ALL STREAMS');
+        console.log('🛑'.repeat(20));
+        
+        let stoppedCount = 0;
+        
+        activeStreams.forEach(stream => {
+            if (stream.ffmpegProcess && stream.ffmpegProcess.exitCode === null) {
+                stream.ffmpegProcess.kill('SIGTERM');
+                console.log(`   🛑 Stopped: ${stream.name}`);
+                stoppedCount++;
             }
         });
+        
+        console.log(`\n✅ Stopped ${stoppedCount} streams. Goodbye!\n`);
         process.exit(0);
     });
-    
+
+    // Keep application running
     await new Promise(() => {});
 }
 
-// Run it
-main().catch(console.error);
+// ================== FFMPEG STREAM FUNCTION ==================
+function startFFmpegStream(sourceUrl, rtmpsUrl, streamId, name) {
+    console.log(`   🚀 Starting FFmpeg for "${name}"...`);
+    
+    const args = [
+        "-re",                    // Read input at native frame rate
+        "-i", sourceUrl,          // Input source URL
+        "-c", "copy",             // Copy codec (no re-encoding)
+        "-f", "flv",              // Output format
+        rtmpsUrl                  // RTMPS destination
+    ];
+    
+    const ffmpeg = spawn("ffmpeg", args);
+    
+    // Log FFmpeg output
+    ffmpeg.stderr.on('data', (data) => {
+        const msg = data.toString();
+        
+        // Show initial connection
+        if (msg.includes('Opening') && msg.includes('output')) {
+            console.log(`   🔓 ${name}: Connected to RTMPS server`);
+        }
+        
+        // Show progress (every 100 frames)
+        if (msg.includes('frame=')) {
+            const frameMatch = msg.match(/frame=\s*(\d+)/);
+            const timeMatch = msg.match(/time=([\d:.]+)/);
+            if (frameMatch && timeMatch && parseInt(frameMatch[1]) % 100 === 0) {
+                console.log(`   📊 ${name}: Frame ${frameMatch[1]}, Time ${timeMatch[1]}`);
+            }
+        }
+        
+        // Show errors
+        if (msg.includes('error') || msg.includes('fail') || msg.includes('Invalid')) {
+            console.error(`   🔥 ${name} error: ${msg.substring(0, 100)}`);
+        }
+    });
+    
+    ffmpeg.on('close', (code) => {
+        console.log(`   🔴 ${name}: FFmpeg exited with code ${code}`);
+    });
+    
+    return ffmpeg;
+}
+
+// ================== RUN APPLICATION ==================
+main().catch(error => {
+    console.error('💥 Application error:', error);
+    process.exit(1);
+});
