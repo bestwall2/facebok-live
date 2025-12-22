@@ -114,7 +114,7 @@ class Logger {
         try {
             const fullMessage = streamId ? `[${streamId}] ${message}` : message;
             const url = `https://api.telegram.org/bot${CONFIG.telegram.botToken}/sendMessage`;
-            
+
             await fetch(url, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -133,12 +133,23 @@ class Logger {
 // ================== ROBUST API FETCHER ==================
 class APIMonitor {
     static async fetchStreamData() {
-        try {
+        try {           
+  
             const response = await fetch(CONFIG.api.url, {
-                headers: { 
-                    'User-Agent': 'StreamMonitor/1.0',
-                    'Accept': 'application/json'
-                },
+                "headers": {
+                "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "accept-language": "en-US,en;q=0.8",
+                "cache-control": "max-age=0",
+                "sec-ch-ua": "\"Brave\";v=\"143\", \"Chromium\";v=\"143\", \"Not A(Brand\";v=\"24\"",
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": "\"Windows\"",
+                "sec-fetch-dest": "document",
+                "sec-fetch-mode": "navigate",
+                "sec-fetch-site": "none",
+                "sec-fetch-user": "?1",
+                "sec-gpc": "1",
+                "upgrade-insecure-requests": "1"
+              },
                 timeout: 15000
             });
             
