@@ -1,435 +1,335 @@
-
 import { spawn } from 'child_process';
-import mysql from 'mysql2/promise';
+
 import fs from 'fs';
-
-// ================== DATABASE CONFIGURATION ==================
-const DB_CONFIG = {
-    host: '185.27.134.129',
-    user: 'if0_40726410',
-    password: 'ZXjyL4seV5O',
-    database: 'if0_40726410_streams',
-    connectionLimit: 10,
-    waitForConnections: true,
-    enableKeepAlive: true,
-    keepAliveInitialDelay: 0
-};
-
-// ================== TELEGRAM CONFIG ==================
-const TELEGRAM = {
+// ================== CONFIGURATION ==================
+const CONFIG = {
+    api: {
+        url: "https://ani-box-nine.vercel.app/api/grok-chat",
+        pollInterval: 30000,  // Check every 30 seconds
+        retryDelay: 10000     // Retry after 10 seconds on failure
+    },
+    telegram: {       
     botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",  // Get from @BotFather
     chatId: "5806630118",
-    enabled: true,
-    alerts: {
-        newStream: true,
-        streamStopped: true,
-        streamModified: true,
-        ffmpegError: true
+        enabled: false,  // Set to true when you configure Telegram
+        alerts: {
+            newStream: true,
+            stoppedStream: true,
+            streamError: true,
+            apiError: false  // Don't spam on API errors
+        }
+    },
+    logging: {
+        logFile: "streams.log",
+        statusReportInterval: 300000  // 5 minutes
     }
 };
 
 // ================== GLOBAL STATE ==================
-let activeStreams = new Map(); // Map<id, {process, info}>
-let dbConnection = null;
-let lastPollTime = Date.now();
-let statusReportInterval = 300000; // 5 minutes
+let activeStreams = new Map();  // id -> {process, info, startTime}
 let lastStatusReport = Date.now();
+let apiErrorCount = 0;
 
-// ================== LOGGER ==================
+// ================== SIMPLE LOGGER ==================
 class Logger {
     static log(level, message, streamId = null) {
-        const timestamp = new Date().toLocaleString();
-        const logEntry = `[${timestamp}] [${level}] ${streamId ? `[${streamId}] ` : ''}${message}`;
+        const timestamp = new Date().toLocaleTimeString();
+        const logEntry = `[${timestamp}] ${level}${streamId ? ` [${streamId}]` : ''}: ${message}`;
         
-        // Console logging (only important messages)
-        const showInConsole = level === 'ERROR' || level === 'WARNING' || 
-                            (level === 'INFO' && (message.includes('Starting') || message.includes('Stopping') || 
-                             message.includes('Status Report') || message.includes('New stream') ||
-                             message.includes('removed') || message.includes('modified')));
+        // Console - only important messages
+        const showInConsole = level === 'ERROR' || level === 'START' || level === 'STOP' || 
+                             level === 'NEW' || level === 'STATUS';
         
         if (showInConsole) {
-            const colors = { INFO: '\x1b[36m', SUCCESS: '\x1b[32m', WARNING: '\x1b[33m', ERROR: '\x1b[31m' };
+            const colors = {
+                'START': '\x1b[32m',  // Green
+                'STOP': '\x1b[33m',   // Yellow
+                'NEW': '\x1b[36m',    // Cyan
+                'ERROR': '\x1b[31m',  // Red
+                'STATUS': '\x1b[35m', // Magenta
+                'INFO': '\x1b[90m'    // Gray
+            };
             console.log(`${colors[level] || ''}${logEntry}\x1b[0m`);
         }
         
         // File logging
-        fs.appendFileSync('stream_monitor.log', logEntry + '\n');
+        try {
+            require('fs').appendFileSync(CONFIG.logging.logFile, logEntry + '\n');
+        } catch (e) {}
         
-        // Status report every 5 minutes
+        // 5-minute status report
         const now = Date.now();
-        if (now - lastStatusReport >= statusReportInterval) {
-            this.logStatusReport();
+        if (now - lastStatusReport >= CONFIG.logging.statusReportInterval) {
+            this.showStatusReport();
             lastStatusReport = now;
         }
     }
     
-    static logStatusReport() {
+    static showStatusReport() {
         console.log('\n' + '📊'.repeat(40));
-        console.log('STATUS REPORT - ' + new Date().toLocaleString());
+        console.log('5-MINUTE STATUS REPORT');
         console.log(`Active streams: ${activeStreams.size}`);
+        console.log(`API errors: ${apiErrorCount}`);
         
         if (activeStreams.size > 0) {
-            console.log('\n📺 ACTIVE STREAMS:');
+            console.log('\n🎥 ACTIVE STREAMS:');
             activeStreams.forEach((stream, id) => {
                 const uptime = Math.floor((Date.now() - stream.startTime) / 1000);
-                const hours = Math.floor(uptime / 3600);
-                const minutes = Math.floor((uptime % 3600) / 60);
-                const seconds = uptime % 60;
-                console.log(`  ${stream.info.name} (ID: ${id}) - Uptime: ${hours}h ${minutes}m ${seconds}s`);
+                const mins = Math.floor(uptime / 60);
+                const secs = uptime % 60;
+                console.log(`  ${stream.info.name} - ${mins}m ${secs}s`);
             });
         }
         
         console.log('📊'.repeat(40) + '\n');
+        
+        // Send Telegram status if enabled
+        if (CONFIG.telegram.enabled) {
+            this.sendTelegram(`📊 Status: ${activeStreams.size} streams active`, 'STATUS');
+        }
     }
     
-    static async sendTelegram(message, streamId = null, alertType = null) {
-        if (!TELEGRAM.enabled || !alertType || !TELEGRAM.alerts[alertType]) return;
+    static async sendTelegram(message, alertType = null) {
+        if (!CONFIG.telegram.enabled || !CONFIG.telegram.botToken || !CONFIG.telegram.chatId) return;
+        if (alertType && !CONFIG.telegram.alerts[alertType]) return;
         
         try {
-            const url = `https://api.telegram.org/bot${TELEGRAM.botToken}/sendMessage`;
-            const fullMessage = streamId ? `[${streamId}] ${message}` : message;
-            
-            await fetch(url, {
+            const response = await fetch(`https://api.telegram.org/bot${CONFIG.telegram.botToken}/sendMessage`, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
+                headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                    chat_id: TELEGRAM.chatId,
-                    text: fullMessage,
+                    chat_id: CONFIG.telegram.chatId,
+                    text: message,
                     parse_mode: 'HTML'
                 })
             });
+            return response.ok;
         } catch (error) {
-            console.error('Telegram error:', error.message);
+            console.log('Telegram error:', error.message);
         }
     }
 }
 
-// ================== DATABASE MANAGER ==================
-class DatabaseManager {
-    static async connect() {
-        try {
-            dbConnection = await mysql.createConnection(DB_CONFIG);
-            Logger.log('INFO', '✅ Database connected successfully');
-            return true;
-        } catch (error) {
-            Logger.log('ERROR', `Database connection failed: ${error.message}`);
-            return false;
-        }
-    }
-    
-    static async disconnect() {
-        if (dbConnection) {
-            await dbConnection.end();
-            Logger.log('INFO', 'Database disconnected');
-        }
-    }
-    
-    static async getAllStreams() {
-        if (!dbConnection) {
-            Logger.log('ERROR', 'No database connection');
-            return [];
-        }
-        
-        try {
-            const [rows] = await dbConnection.execute(`
-                SELECT id, name, rtmps_url, rtmp_source, stream_time, status, created_at, updated_at
-                FROM streams 
-                WHERE status != 'deleted'
-                ORDER BY id DESC
-            `);
-            
-            return rows;
-        } catch (error) {
-            Logger.log('ERROR', `Database query failed: ${error.message}`);
-            return [];
-        }
-    }
-    
-    static async getStreamById(id) {
-        if (!dbConnection) return null;
-        
-        try {
-            const [rows] = await dbConnection.execute(
-                'SELECT * FROM streams WHERE id = ? AND status != "deleted"',
-                [id]
-            );
-            return rows[0] || null;
-        } catch (error) {
-            Logger.log('ERROR', `Get stream by ID failed: ${error.message}`);
-            return null;
-        }
-    }
-    
-    static async updateStreamStatus(id, status) {
-        if (!dbConnection) return false;
-        
-        try {
-            await dbConnection.execute(
-                'UPDATE streams SET status = ?, updated_at = NOW() WHERE id = ?',
-                [status, id]
-            );
-            Logger.log('INFO', `Updated stream ${id} status to ${status}`, id);
-            return true;
-        } catch (error) {
-            Logger.log('ERROR', `Update stream status failed: ${error.message}`, id);
-            return false;
-        }
-    }
-    
-    static async logStreamEvent(streamId, eventType, message) {
-        if (!dbConnection) return;
-        
-        try {
-            await dbConnection.execute(
-                'INSERT INTO stream_logs (stream_id, event_type, message) VALUES (?, ?, ?)',
-                [streamId, eventType, message]
-            );
-        } catch (error) {
-            console.error('Log stream event failed:', error.message);
-        }
-    }
-}
-
-// ================== FFMPEG MANAGER ==================
-class FFmpegManager {
+// ================== FFMPEG STREAM MANAGER ==================
+class StreamManager {
     static startStream(streamInfo) {
         const { id, name, rtmps_url, rtmp_source } = streamInfo;
         
-        Logger.log('INFO', `Starting: ${name}`, id);
-        Logger.sendTelegram(`🟢 Starting: ${name}`, id, 'newStream');
+        Logger.log('START', `Starting: ${name}`, id);
+        Logger.sendTelegram(`🟢 STARTING: ${name}`, 'newStream');
         
-        const args = [
-            "-re", "-i", rtmp_source,
-            "-map", "0:v:0", "-map", "0:a:0",
-            "-c:v", "libx264", "-preset", "veryfast",
-            "-pix_fmt", "yuv420p", "-r", "25", "-g", "50",
-            "-b:v", "3000k", "-maxrate", "3000k", "-bufsize", "6000k",
-            "-c:a", "aac", "-ar", "44100", "-b:a", "128k", "-ac", "2",
-            "-f", "flv", rtmps_url
-        ];
+        // Simple FFmpeg command
+        const ffmpeg = require('child_process').spawn("ffmpeg", [
+            "-re",
+            "-i", rtmp_source,
+            "-c", "copy",          // No re-encoding if possible
+            "-f", "flv",
+            rtmps_url
+        ]);
         
-        const ffmpeg = spawn("ffmpeg", args);
-        
+        // Store stream info
         const streamData = {
             process: ffmpeg,
             info: streamInfo,
-            startTime: new Date(),
-            restartAttempts: 0
+            startTime: Date.now(),
+            restartCount: 0
         };
         
         activeStreams.set(id, streamData);
         
-        // FFmpeg output handling
+        // Handle FFmpeg output
         ffmpeg.stderr.on('data', (data) => {
             const msg = data.toString();
-            if (msg.includes('error') || msg.includes('fail')) {
-                Logger.log('ERROR', `FFmpeg: ${msg.substring(0, 100)}`, id);
-                Logger.sendTelegram(`🔴 FFmpeg error: ${msg.substring(0, 100)}`, id, 'ffmpegError');
-                DatabaseManager.logStreamEvent(id, 'ffmpeg_error', msg.substring(0, 200));
+            
+            // Show connection success
+            if (msg.includes('Opening') && msg.includes('output')) {
+                Logger.log('INFO', `Connected to Facebook`, id);
+            }
+            
+            // Show errors
+            if (msg.includes('error') || msg.includes('fail') || msg.includes('Invalid')) {
+                const errorMsg = msg.substring(0, 100);
+                Logger.log('ERROR', `FFmpeg: ${errorMsg}`, id);
+                Logger.sendTelegram(`🔴 ERROR in ${name}: ${errorMsg}`, 'streamError');
+            }
+            
+            // Show progress (occasionally)
+            if (msg.includes('frame=') && Math.random() < 0.05) {
+                const frameMatch = msg.match(/frame=\s*(\d+)/);
+                const timeMatch = msg.match(/time=([\d:.]+)/);
+                if (frameMatch) {
+                    Logger.log('INFO', `Frame ${frameMatch[1]}${timeMatch ? `, Time ${timeMatch[1]}` : ''}`, id);
+                }
             }
         });
         
         ffmpeg.on('close', (code) => {
-            Logger.log('WARNING', `FFmpeg exited with code ${code}`, id);
+            Logger.log('STOP', `Stopped (code: ${code})`, id);
             activeStreams.delete(id);
             
-            // Update database status
-            DatabaseManager.updateStreamStatus(id, 'stopped');
-            
-            // Auto-restart logic (max 3 attempts)
-            if (code !== 0 && streamData.restartAttempts < 3) {
-                streamData.restartAttempts++;
-                setTimeout(async () => {
-                    const currentInfo = await DatabaseManager.getStreamById(id);
-                    if (currentInfo && currentInfo.status === 'active') {
-                        Logger.log('INFO', `Auto-restarting ${name} (attempt ${streamData.restartAttempts})`, id);
-                        FFmpegManager.startStream(currentInfo);
-                    }
-                }, 10000);
+            // Auto-restart logic (max 2 attempts)
+            if (code !== 0 && streamData.restartCount < 2) {
+                streamData.restartCount++;
+                setTimeout(() => {
+                    Logger.log('INFO', `Restarting (attempt ${streamData.restartCount})`, id);
+                    StreamManager.startStream(streamInfo);
+                }, 5000);
             }
         });
-        
-        // Update database to running
-        DatabaseManager.updateStreamStatus(id, 'running');
-        DatabaseManager.logStreamEvent(id, 'stream_started', `Stream started successfully`);
         
         return ffmpeg;
     }
     
-    static stopStream(streamId, reason = 'Manual stop') {
-        const stream = activeStreams.get(streamId);
+    static stopStream(id, reason = "API removed") {
+        const stream = activeStreams.get(id);
         if (!stream) return false;
         
-        Logger.log('INFO', `Stopping: ${stream.info.name} (${reason})`, streamId);
-        Logger.sendTelegram(`🟡 Stopping: ${stream.info.name}`, streamId, 'streamStopped');
+        Logger.log('STOP', `Stopping: ${stream.info.name} (${reason})`, id);
+        Logger.sendTelegram(`🟡 STOPPED: ${stream.info.name}`, 'stoppedStream');
         
         try {
             stream.process.kill('SIGTERM');
-        } catch (error) {
-            Logger.log('WARNING', `Error stopping process: ${error.message}`, streamId);
+        } catch (e) {
+            // Process already dead
         }
         
-        activeStreams.delete(streamId);
-        DatabaseManager.updateStreamStatus(streamId, 'stopped');
-        DatabaseManager.logStreamEvent(streamId, 'stream_stopped', reason);
-        
+        activeStreams.delete(id);
         return true;
     }
     
-    static stopAllStreams() {
+    static stopAll() {
         let count = 0;
         activeStreams.forEach((stream, id) => {
-            this.stopStream(id, 'System shutdown');
+            this.stopStream(id, "System shutdown");
             count++;
         });
         return count;
     }
 }
 
-// ================== STREAM MONITOR ==================
-class StreamMonitor {
-    static async monitorStreams() {
-        if (!dbConnection) {
-            Logger.log('ERROR', 'No database connection for monitoring');
-            return;
-        }
-        
+// ================== API MONITOR ==================
+class APIMonitor {
+    static async fetchStreams() {
         try {
-            const dbStreams = await DatabaseManager.getAllStreams();
-            Logger.log('INFO', `Database: ${dbStreams.length} streams found`);
-            
-            // Process active streams from database
-            const activeDbStreams = dbStreams.filter(s => s.status === 'active');
-            
-            // Stop streams that are in our active list but not in database
-            activeStreams.forEach((stream, id) => {
-                const existsInDb = activeDbStreams.find(s => s.id == id);
-                if (!existsInDb) {
-                    Logger.log('INFO', `Stream ${stream.info.name} not in database, stopping`, id);
-                    FFmpegManager.stopStream(id, 'Removed from database');
-                    Logger.sendTelegram(`🗑️ Removed: ${stream.info.name}`, id, 'streamStopped');
-                }
+            const response = await fetch(CONFIG.api.url, {
+                headers: {
+                    'User-Agent': 'StreamMonitor/1.0',
+                    'Accept': 'application/json'
+                },
+                timeout: 15000
             });
             
-            // Start or update streams from database
-            for (const dbStream of activeDbStreams) {
-                const isRunning = activeStreams.has(dbStream.id);
-                const runningStream = activeStreams.get(dbStream.id);
-                
-                if (!isRunning) {
-                    // New active stream
-                    Logger.log('INFO', `New active stream: ${dbStream.name}`, dbStream.id);
-                    FFmpegManager.startStream(dbStream);
-                    Logger.sendTelegram(`🆕 New stream: ${dbStream.name}`, dbStream.id, 'newStream');
-                } else if (runningStream) {
-                    // Check if stream needs restart (source changed)
-                    if (runningStream.info.rtmps_url !== dbStream.rtmps_url ||
-                        runningStream.info.rtmp_source !== dbStream.rtmp_source) {
-                        
-                        Logger.log('INFO', `Stream ${dbStream.name} source modified, restarting`, dbStream.id);
-                        FFmpegManager.stopStream(dbStream.id, 'Source modified');
-                        setTimeout(() => {
-                            FFmpegManager.startStream(dbStream);
-                        }, 2000);
-                        Logger.sendTelegram(`✏️ Modified: ${dbStream.name}`, dbStream.id, 'streamModified');
-                    }
-                }
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
             }
             
-            // Handle inactive streams in database
-            const inactiveDbStreams = dbStreams.filter(s => s.status === 'inactive');
-            inactiveDbStreams.forEach(stream => {
-                if (activeStreams.has(stream.id)) {
-                    Logger.log('INFO', `Stream ${stream.name} marked inactive in DB`, stream.id);
-                    FFmpegManager.stopStream(stream.id, 'Marked inactive in database');
-                }
-            });
+            const data = await response.json();
+            
+            // Handle nested structure from your API
+            const apiData = data.data || data;
+            
+            if (!apiData.success) {
+                throw new Error('API returned success: false');
+            }
+            
+            // Reset error counter on success
+            apiErrorCount = 0;
+            
+            return apiData.data || [];
             
         } catch (error) {
-            Logger.log('ERROR', `Monitor error: ${error.message}`);
+            apiErrorCount++;
+            
+            // Only log every 5th error to avoid spam
+            if (apiErrorCount % 5 === 1) {
+                Logger.log('ERROR', `API error ${apiErrorCount}: ${error.message}`);
+            }
+            
+            // Return empty array to keep existing streams running
+            return [];
         }
     }
     
-    static async healthCheck() {
-        let deadStreams = [];
+    static async monitor() {
+        const streams = await this.fetchStreams();
         
-        activeStreams.forEach((stream, id) => {
-            if (stream.process.exitCode !== null) {
-                deadStreams.push({ id, name: stream.info.name });
-                activeStreams.delete(id);
-            }
-        });
-        
-        if (deadStreams.length > 0) {
-            Logger.log('WARNING', `Found ${deadStreams.length} dead streams`);
-            deadStreams.forEach(stream => {
-                Logger.sendTelegram(`💀 Stream died: ${stream.name}`, stream.id, 'ffmpegError');
-                DatabaseManager.updateStreamStatus(stream.id, 'error');
+        // If API returns data
+        if (streams.length > 0) {
+            Logger.log('INFO', `API: ${streams.length} streams found`);
+            
+            // Check for new/removed streams
+            const activeIds = new Set(streams.map(s => s.id));
+            const currentIds = new Set(activeStreams.keys());
+            
+            // Stop streams removed from API
+            currentIds.forEach(id => {
+                if (!activeIds.has(id)) {
+                    Logger.log('NEW', `Removed from API`, id);
+                    StreamManager.stopStream(id, "Removed from API");
+                }
             });
+            
+            // Start new active streams
+            streams.forEach(stream => {
+                if (stream.status === 'active' && !activeStreams.has(stream.id)) {
+                    Logger.log('NEW', `New stream: ${stream.name}`, stream.id);
+                    StreamManager.startStream(stream);
+                }
+            });
+            
+        } else if (streams.length === 0) {
+            // API returned empty array (no streams)
+            Logger.log('INFO', 'API returned 0 streams');
+            
+            // If we have active streams but API says none, stop them
+            if (activeStreams.size > 0) {
+                Logger.log('INFO', 'Stopping all streams (API returned empty)');
+                StreamManager.stopAll();
+            }
         }
         
-        return deadStreams;
+        // Show current status
+        Logger.log('STATUS', `Active: ${activeStreams.size} streams`);
     }
 }
 
 // ================== MAIN APPLICATION ==================
 async function main() {
-    console.log('\n' + '🚀'.repeat(40));
-    console.log('MYSQL STREAM MONITOR SERVER');
-    console.log('Database: ' + DB_CONFIG.database);
-    console.log('🚀'.repeat(40) + '\n');
+    console.log('\n' + '='.repeat(50));
+    console.log('📡 STREAM MONITOR STARTING');
+    console.log(`🌐 API: ${CONFIG.api.url}`);
+    console.log('='.repeat(50) + '\n');
     
-    // Connect to database
-    const dbConnected = await DatabaseManager.connect();
-    if (!dbConnected) {
-        console.error('❌ Cannot start without database connection');
-        process.exit(1);
+    // Initial Telegram notification
+    if (CONFIG.telegram.enabled) {
+        await Logger.sendTelegram('🚀 Stream Monitor Started', 'newStream');
     }
     
-    Logger.sendTelegram('🚀 MySQL Stream Monitor Started');
+    // Initial API check
+    Logger.log('INFO', 'Performing initial API check...');
+    await APIMonitor.monitor();
     
-    // Initial load
-    Logger.log('INFO', 'Performing initial stream load...');
-    await StreamMonitor.monitorStreams();
-    
-    // Main monitoring loop (every 30 seconds)
+    // Start monitoring loop
     const monitorInterval = setInterval(async () => {
-        try {
-            await StreamMonitor.monitorStreams();
-            
-            // Health check every 2 minutes
-            if (Date.now() % 120000 < 30000) {
-                await StreamMonitor.healthCheck();
-            }
-            
-        } catch (error) {
-            Logger.log('ERROR', `Monitoring loop error: ${error.message}`);
-        }
-    }, 30000);
-    
-    // Status report every 5 minutes
-    const statusInterval = setInterval(() => {
-        Logger.log('INFO', '5-minute status check');
-        Logger.logStatusReport();
-    }, 300000);
+        await APIMonitor.monitor();
+    }, CONFIG.api.pollInterval);
     
     // Graceful shutdown
-    process.on('SIGINT', async () => {
+    process.on('SIGINT', () => {
         clearInterval(monitorInterval);
-        clearInterval(statusInterval);
         
-        console.log('\n' + '🛑'.repeat(40));
-        console.log('GRACEFUL SHUTDOWN');
-        console.log('🛑'.repeat(40));
+        console.log('\n' + '🛑'.repeat(25));
+        console.log('SHUTDOWN INITIATED');
+        console.log('🛑'.repeat(25));
         
-        Logger.log('INFO', 'Server shutdown initiated');
-        Logger.sendTelegram('🛑 Stream Monitor Shutting Down');
+        const stopped = StreamManager.stopAll();
         
-        const stoppedCount = FFmpegManager.stopAllStreams();
-        await DatabaseManager.disconnect();
+        if (CONFIG.telegram.enabled) {
+            Logger.sendTelegram(`🛑 Monitor stopped. ${stopped} streams terminated.`);
+        }
         
-        console.log(`\n✅ Stopped ${stoppedCount} streams`);
-        console.log('📝 Logs saved to: stream_monitor.log');
+        console.log(`\n✅ Stopped ${stopped} streams`);
+        console.log('📝 Logs saved to:', CONFIG.logging.logFile);
         console.log('\n👋 Goodbye!\n');
         
         process.exit(0);
@@ -439,15 +339,17 @@ async function main() {
     await new Promise(() => {});
 }
 
-// ================== STARTUP ==================
-// Install required packages first:
-// npm install mysql2
+// ================== QUICK START ==================
+// 1. Create package.json with "type": "module"
+// 2. Run: node stream-monitor.js
 
-if (!TELEGRAM.botToken || TELEGRAM.botToken === "YOUR_TELEGRAM_BOT_TOKEN") {
-    console.log('⚠️ Running without Telegram notifications');
-    TELEGRAM.enabled = false;
+// Check if fetch is available (Node 18+)
+if (typeof fetch === 'undefined') {
+    console.log('⚠️ Node.js 18+ required (or install node-fetch)');
+    process.exit(1);
 }
 
+// Start the application
 main().catch(error => {
     console.error('💥 Fatal error:', error);
     process.exit(1);
