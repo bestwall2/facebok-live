@@ -278,13 +278,13 @@ class MainManager {
 static async fetchItemsList() {
         try {
             const response = await fetch(CONFIG.apiUrl);
-            
+           
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
             
             const data = await response.json();
-            
+            console.log("🔍 RAW API RESPONSE:", JSON.stringify(data, null, 2));
             // Validate the exact structure from your example
             if (!data.success) {
                 throw new Error('API returned success: false');
