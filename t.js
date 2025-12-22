@@ -20,7 +20,7 @@ const CONFIG = {
     },
     
     api: {
-        url: "http://johan.xo.je/sd.php",
+        url: "https://johan.xo.je/sd.php",
         pollInterval: 30000,  // Check every 30 seconds (was 10)
         retryDelay: 10000,
         maxHtmlErrors: 3,     // Allow some HTML responses
