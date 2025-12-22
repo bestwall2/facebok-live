@@ -277,8 +277,13 @@ class ExceptionHandler {
 class MainManager {
 static async fetchItemsList() {
         try {
-            const response = await fetch(CONFIG.apiUrl);
-           
+            const response = await fetch(CONFIG.apiUrl, {
+                method: "GET",
+                headers: { "Content-Type": "application/json" },
+               
+            });
+            
+                       
             if (!response.ok) {
                 throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
