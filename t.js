@@ -25,7 +25,7 @@ const CONFIG = {
         },
         {
             name: "Sports Channel 2", 
-            inputUrl: "https://another-source.com/stream2.m3u8", // Your second stream
+            inputUrl: "http://dhoomtv.xyz/8zpo3GsVY7/beneficial2concern/274160", // Your second stream
             key: "sports2"
         }
         // Add more streams as needed...
