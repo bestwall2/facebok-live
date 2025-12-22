@@ -5,7 +5,7 @@ import fs from 'fs';
 
 // ================== DATABASE CONFIGURATION ==================
 const DB_CONFIG = {
-    host: 'sql102.infinityfree.com',
+    host: '185.27.134.129',
     user: 'if0_40726410',
     password: 'ZXjyL4seV5O',
     database: 'if0_40726410_streams',
