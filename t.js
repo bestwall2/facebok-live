@@ -275,34 +275,52 @@ class ExceptionHandler {
 
 // ================== MAIN STREAM MANAGER ==================
 class MainManager {
-    static async fetchItemsList() {
+static async fetchItemsList() {
         try {
             const response = await fetch(CONFIG.apiUrl);
-            const data = await response.json();
             
-            // Handle nested data structure
-            const apiData = data.data || data;
-            
-            if (!apiData.success || !apiData.data) {
-                throw new Error('Invalid API response format');
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
             }
             
-            // Transform to our format
+            const data = await response.json();
+            
+            // Validate the exact structure from your example
+            if (!data.success) {
+                throw new Error('API returned success: false');
+            }
+            
+            if (!Array.isArray(data.data)) {
+                throw new Error('API data is not an array');
+            }
+            
             const items = new Map();
-            apiData.data.forEach((item, index) => {
-                const itemId = item.id || `item_${index}_${Date.now()}`;
+            
+            // Process each item exactly as in your JSON
+            data.data.forEach((item) => {
+                // Validate required fields
+                if (!item.token || !item.name || !item.source) {
+                    console.warn(`Skipping item ${item.id || 'unknown'}: missing required fields`);
+                    return;
+                }
+                
+                const itemId = item.id || `item_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+                
                 items.set(itemId, {
                     id: itemId,
-                    token: item.access_token || item.token,
-                    name: item.name,
-                    source: item.rtmp_source || item.source,
-                    img: item.img || item.image || 'default.jpg',
-                    pageId: null,
-                    rtmpsUrl: null,
-                    dashUrl: null
+                    token: item.token,           // Access token for this item
+                    name: item.name,            // Stream name
+                    source: item.source,        // Source URL (M3U8/MP4/etc)
+                    img: item.img || 'default.jpg', // Image for this stream
+                    pageId: null,               // Will be fetched later
+                    rtmpsUrl: null,             // Will be created later
+                    dashUrl: null               // Will be fetched later
                 });
+                
+                console.log(`✅ Loaded: ${item.name} (${itemId})`);
             });
             
+            console.log(`📊 Total items loaded: ${items.size}`);
             return items;
             
         } catch (error) {
