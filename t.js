@@ -98,11 +98,14 @@ class StreamManager {
         
         
         // Robust FFmpeg command with encoding
-        const ffmpeg = spawn("ffmpeg", [                         
+        const ffmpeg = spawn("ffmpeg", [   
+            "-re", 
             "-i", rtmp_source,          // Input source URL
             "-c", "copy",             // Copy codec (no re-encoding)
             "-f", "flv",              // Output format
-            rtmps_url                 // Output URL
+            rtmps_url   
+            
+                 
         ]);
         
         // Store stream info
