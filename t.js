@@ -20,7 +20,7 @@ const CONFIG = {
   apiUrl: "https://ani-box-nine.vercel.app/api/grok-chat",
 
   pollInterval: 60_000,          // فحص دوري كل دقيقة
-  restartDelay: 1 * 60_000,      // ⏳ انتظار دقيقتين بعد أي استثناء
+  restartDelay:  60_00,      // ⏳ انتظار دقيقتين بعد أي استثناء
   reportInterval: 5 * 60_000,    // 📊 تقرير Telegram كل 5 دقائق
 
   telegram: {
