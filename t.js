@@ -1,32 +1,28 @@
 /******************************************************************
- * FACEBOOK MULTI STREAM MANAGER
- * Author: You
- * Description:
- * - Fetch streams from API
- * - Create Facebook Live
- * - Wait 15 seconds before FFmpeg
- * - Start FFmpeg
- * - Wait for ALL streams to be running
- * - Then fetch DASH URLs (MPD)
- * - Send full Telegram reports
- * - Handle exceptions with minimal delay
+ * FACEBOOK MULTI STREAM MANAGER – CONTROL MODE
+ * - START / STOP / RESTART via Control API
+ * - No API data change checking
+ * - Global restart every 3h45m
+ * - Independent live retry (1 time)
  ******************************************************************/
 
-// ================== IMPORTS ==================
-import { spawn } from "child_process";
 import fs from "fs";
+import ffmpeg from "fluent-ffmpeg";
 
 // ================== CONFIG ==================
 const CONFIG = {
-  apiUrl: "https://ani-box-nine.vercel.app/api/grok-chat",
+  streamsApi: "https://ani-box-nine.vercel.app/api/grok-chat",
 
-  pollInterval: 60_000,          // Check every minute for API changes
-  restartDelay: 30_000,          // ⏳ Wait ONLY 30 seconds after any exception
-  reportInterval: 5 * 60_000,    // 📊 Telegram report every 5 minutes
-  healthCheckInterval: 30_000,   // Health check every 30 seconds
-  maxRetries: 3,                 // Max retries per stream before full restart
-  preStartDelay: 15_000,         // Wait 15 seconds before starting FFmpeg
-  ffmpegStartDelay: 2_000,       // Delay between FFmpeg starts (2 seconds)
+  //  CONTROL API (you will change this later)
+  controlApi: "https://ovubovyckalyentrgahb.supabase.co/rest/v1/isState",
+  controlToken: "sb_publishable_D1BH-HDP_S_myTuLK_q0gg_LbWZ0g5K"
+  controlPollInterval: 20_000,
+  healthCheckInterval: 30_000,
+  reportInterval: 5 * 60_000,
+
+  maxRetries: 1,
+  restartDelay: 10_000,
+  globalRestartAfter: 3.75 * 60 * 60 * 1000,
 
   telegram: {
     botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",
@@ -34,55 +30,96 @@ const CONFIG = {
   }
 };
 
-// ================== GLOBAL STATE ==================
-let allItems = new Map();        // All streams
-let activeStreams = new Map();   // FFmpeg processes with metadata
-let isRestarting = false;
+const FACEBOOK_FFMPEG_OPTIONS = {
+  input: [
+    "-re",
+    "-fflags", "+genpts",
+    "-avoid_negative_ts", "make_zero",
+    "-reconnect", "1",
+    "-reconnect_streamed", "1",
+    "-reconnect_delay_max", "5",
+    "-user_agent", "Mozilla/5.0"
+  ],
+
+  output: [
+    // 🎥 VIDEO
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-tune", "zerolatency",
+    "-profile:v", "high",
+    "-level", "4.1",
+    "-pix_fmt", "yuv420p",
+    "-r", "30",
+    "-g", "60",
+    "-keyint_min", "60",
+    "-sc_threshold", "0",
+    "-bf", "2",
+
+    // 📦 BITRATE (CBR)
+    "-b:v", "4500k",
+    "-maxrate", "4500k",
+    "-bufsize", "9000k",
+
+    // 🔊 AUDIO
+    "-c:a", "aac",
+    "-b:a", "128k",
+    "-ar", "44100",
+    "-ac", "2",
+
+    // 📡 FORMAT
+    "-f", "flv",
+    "-flvflags", "no_duration_filesize"
+  ]
+};
+
+
+// ================== STATE ==================
+let allItems = new Map();
+let activeStreams = new Map();
+let streamRetries = new Map();
+
+let systemState = "stopped"; // running | stopped | restarting
+let globalRestartTimer = null;
 let startTime = Date.now();
-let apiDataHash = "";           // Store hash of API data to detect changes
-let streamRetries = new Map();  // Track retry counts per stream
 
 // ================== LOGGER ==================
 class Logger {
-  static log(level, msg) {
-    const line = `[${new Date().toISOString()}] [${level}] ${msg}`;
+  static log(l, m) {
+    const line = `[${new Date().toISOString()}] [${l}] ${m}`;
     console.log(line);
-    fs.appendFileSync("logs.txt", line + "\n");
+    fs.appendFileSync("system.log", line + "\n");
   }
-  static info(m) { this.log("INFO", m); }
-  static warn(m) { this.log("WARN", m); }
-  static error(m) { this.log("ERROR", m); }
-  static success(m) { this.log("SUCCESS", m); }
+  static info(m){this.log("INFO",m)}
+  static warn(m){this.log("WARN",m)}
+  static error(m){this.log("ERROR",m)}
+  static success(m){this.log("SUCCESS",m)}
 }
 
 // ================== TELEGRAM ==================
 class Telegram {
   static async send(text) {
-    const url = `https://api.telegram.org/bot${CONFIG.telegram.botToken}/sendMessage`;
-    await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        chat_id: CONFIG.telegram.chatId,
-        text,
-        parse_mode: "HTML"
-      })
-    });
+    await fetch(
+      `https://api.telegram.org/bot${CONFIG.telegram.botToken}/sendMessage`,
+      {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({
+          chat_id: CONFIG.telegram.chatId,
+          text
+        })
+      }
+    );
   }
 }
 
 // ================== FACEBOOK ==================
 class FacebookAPI {
-  // Create Facebook Live
   static async createLive(token, name) {
     const res = await fetch(
       "https://graph.facebook.com/v24.0/me/live_videos",
       {
         method: "POST",
-        headers: { 
-          "Content-Type": "application/json",
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        },
+        headers: {"Content-Type":"application/json"},
         body: JSON.stringify({
           title: name,
           status: "UNPUBLISHED",
@@ -90,652 +127,197 @@ class FacebookAPI {
         })
       }
     );
-    const json = await res.json();
-    if (json.error) throw new Error(json.error.message);
-    return {
-      id: json.id,
-      rtmps: json.secure_stream_url
-    };
-  }
-
-  // Get DASH after FFmpeg starts
-  static async getDash(id, token) {
-    const res = await fetch(
-      `https://graph.facebook.com/v24.0/${id}?fields=dash_preview_url&access_token=${token}`,
-      {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-      }
-    );
-    const json = await res.json();
-    if (json.error) throw new Error(json.error.message);
-    return json.dash_preview_url;
-  }
-}
-
-// ================== FFMPEG ERROR ANALYZER ==================
-class FfmpegErrorAnalyzer {
-  static analyzeErrorMessage(errorMsg) {
-    const error = errorMsg.toLowerCase();
-    let type = "Unknown Error";
-    let details = errorMsg.slice(0, 200);
-    let solution = "Check logs for details";
-    
-    // Network/Connection Errors
-    if (error.includes("connection refused") || error.includes("connection failed")) {
-      type = "Connection Error";
-      details = "Cannot connect to source server";
-      solution = "Check if source server is online";
-    }
-    else if (error.includes("no route to host") || error.includes("network is unreachable")) {
-      type = "Network Error";
-      details = "Network route to server unavailable";
-      solution = "Check network connectivity";
-    }
-    else if (error.includes("connection timed out") || error.includes("timeout")) {
-      type = "Timeout Error";
-      details = "Connection to source timed out";
-      solution = "Server may be overloaded";
-    }
-    else if (error.includes("end of file") || error.includes("eof")) {
-      type = "Stream Ended";
-      details = "Source stream ended unexpectedly";
-      solution = "Source server stopped streaming";
-    }
-    
-    // Input/URL Errors
-    else if (error.includes("invalid data found") || error.includes("invalid input")) {
-      type = "Input Format Error";
-      details = "Source stream format not recognized";
-      solution = "Check source URL format";
-    }
-    else if (error.includes("server returned") || error.includes("401") || error.includes("403")) {
-      type = "Authentication Error";
-      details = "Source server rejected connection";
-      solution = "Check credentials";
-    }
-    else if (error.includes("404") || error.includes("not found")) {
-      type = "URL Not Found";
-      details = "Source URL does not exist";
-      solution = "Verify source URL";
-    }
-    else if (error.includes("protocol not found")) {
-      type = "Protocol Error";
-      details = "Unsupported streaming protocol";
-      solution = "Check protocol support";
-    }
-    
-    // FFmpeg/Encoding Errors
-    else if (error.includes("cannot open resource") || error.includes("failed to open")) {
-      type = "Resource Error";
-      details = "Cannot open source stream";
-      solution = "Source may be offline";
-    }
-    else if (error.includes("input/output error")) {
-      type = "I/O Error";
-      details = "Disk or network I/O error";
-      solution = "Check system resources";
-    }
-    else if (error.includes("bitstream filter not found")) {
-      type = "Codec Error";
-      details = "Unsupported codec";
-      solution = "FFmpeg may need codecs";
-    }
-    
-    // Output/Destination Errors
-    else if (error.includes("failed to update header") || error.includes("broken pipe")) {
-      type = "Output Error";
-      details = "Cannot write to Facebook";
-      solution = "Check Facebook token";
-    }
-    else if (error.includes("access denied") || error.includes("permission denied")) {
-      type = "Permission Error";
-      details = "Access denied to destination";
-      solution = "Check Facebook access";
-    }
-    
-    return { type, details, solution };
-  }
-  
-  static getDetailedReport(errorMsg, streamName) {
-    const analysis = this.analyzeErrorMessage(errorMsg);
-    return {
-      title: `🔴 FFmpeg Error: ${streamName}`,
-      errorType: analysis.type,
-      errorDetails: analysis.details,
-      solution: analysis.solution,
-      timestamp: new Date().toISOString(),
-      rawError: errorMsg.slice(0, 300)
-    };
+    const j = await res.json();
+    if (j.error) throw new Error(j.error.message);
+    return { id: j.id, rtmps: j.secure_stream_url };
   }
 }
 
 // ================== STREAM MANAGER ==================
 class StreamManager {
   static startFFmpeg(item) {
-    try {
-      Logger.info(`Starting FFmpeg for: ${item.name}`);
-      
-      // Increment retry counter
-      const currentRetries = streamRetries.get(item.id) || 0;
-      streamRetries.set(item.id, currentRetries + 1);
-      console.log(item.source);
-      // FFmpeg command with User-Agent
-      const ff = spawn("ffmpeg", [
-        "-re",
-       
-        "-i", item.source,
-        "-c", "copy",
-        "-f", "flv",
-        item.rtmps
-      ], {
-        detached: true
-      });
-
-      // Store stream info with metadata
-      activeStreams.set(item.id, {
-        process: ff,
-        item: item,
-        startTime: Date.now(),
-        status: "running",
-        retries: currentRetries + 1,
-        lastOutput: Date.now(),
-        lastError: null,
-        errorCount: 0
-      });
-
-      // Monitor FFmpeg output
-      ff.stdout.on("data", d => {
-        const streamInfo = activeStreams.get(item.id);
-        if (streamInfo) {
-          streamInfo.lastOutput = Date.now();
-        }
-      });
-
-      ff.stderr.on("data", d => {
-        const msg = d.toString();
-        const streamInfo = activeStreams.get(item.id);
-        if (streamInfo) {
-          streamInfo.lastOutput = Date.now();
-          
-          // Log FFmpeg output for debugging
-          if (msg.trim().length > 0) {
-            fs.appendFileSync(`ffmpeg_${item.id}.log`, `[${new Date().toISOString()}] ${msg}`);
-          }
-        }
-        
-        // Check for errors
-        if (this.isErrorMessage(msg)) {
-          const errorAnalysis = FfmpegErrorAnalyzer.getDetailedReport(msg, item.name);
-          streamInfo.lastError = errorAnalysis;
-          streamInfo.errorCount = (streamInfo.errorCount || 0) + 1;
-          
-          Logger.error(`FFmpeg error [${item.name}]: ${errorAnalysis.errorType} - ${errorAnalysis.errorDetails}`);
-          
-          // Send error to Telegram (limited to avoid spam)
-          if (streamInfo.errorCount <= 2) {
-            Telegram.send(
-              `🔴 FFmpeg Error: ${item.name}\n\n` +
-              `📛 Type: ${errorAnalysis.errorType}\n` +
-              `📋 Details: ${errorAnalysis.errorDetails}\n` +
-              `🛠️ Solution: ${errorAnalysis.solution}\n` +
-              `🔄 Retry: ${streamInfo.retries}/${CONFIG.maxRetries}`
-            );
-          }
-          
-          // Individual stream failure handling
-          if (streamInfo && streamInfo.retries <= CONFIG.maxRetries) {
-            Logger.info(`Attempting to restart stream: ${item.name} (retry ${streamInfo.retries}/${CONFIG.maxRetries})`);
-            setTimeout(() => {
-              StreamManager.restartStream(item.id, errorAnalysis.errorType);
-            }, 5000);
-          } else {
-            // Too many retries
-            ExceptionHandler.trigger(`FFmpeg Error in ${item.name} - ${errorAnalysis.errorType}`);
-          }
-        }
-      });
-
-      ff.on("exit", (code, signal) => {
-        let exitReason = "";
-        if (code !== null) {
-          exitReason = `Exit code: ${code}`;
-        } else if (signal !== null) {
-          exitReason = `Killed by signal: ${signal}`;
-        }
-        
-        Logger.warn(`FFmpeg exited [${item.name}]: ${exitReason}`);
-        
-        const streamInfo = activeStreams.get(item.id);
-        if (streamInfo) {
-          streamInfo.status = "stopped";
-          streamInfo.exitCode = code;
-          streamInfo.exitSignal = signal;
-          streamInfo.stopTime = Date.now();
-        }
-        
-        // Individual stream restart logic
-        if (streamInfo && streamInfo.retries <= CONFIG.maxRetries) {
-          Logger.info(`Stream ${item.name} exited, attempting restart (retry ${streamInfo.retries}/${CONFIG.maxRetries})`);
-          
-          setTimeout(() => {
-            StreamManager.restartStream(item.id, "Process Exit");
-          }, 5000);
-        } else {
-          ExceptionHandler.trigger(`FFmpeg Exit in ${item.name} - Max retries`);
-        }
-      });
-
-      ff.on("error", (err) => {
-        Logger.error(`FFmpeg spawn error [${item.name}]: ${err.message}`);
-        const errorAnalysis = FfmpegErrorAnalyzer.getDetailedReport(err.message, item.name);
-        
-        Telegram.send(
-          `🚨 FFmpeg Spawn Error: ${item.name}\n\n` +
-          `📛 Type: ${errorAnalysis.errorType}\n` +
-          `📋 Details: ${errorAnalysis.errorDetails}\n` +
-          `🛠️ Solution: ${errorAnalysis.solution}`
+    Logger.info(`🎬 Starting ${item.name}`);
+  
+    const cmd = ffmpeg(item.source)
+      .inputOptions(FACEBOOK_FFMPEG_OPTIONS.input)
+      .outputOptions(FACEBOOK_FFMPEG_OPTIONS.output)
+      .output(item.rtmps)
+      .on("start", c => {
+        Logger.success(`▶ ${item.name} started`);
+        fs.appendFileSync(`ffmpeg_${item.id}.cmd.txt`, c + "\n");
+      })
+      .on("progress", () => {
+        const i = activeStreams.get(item.id);
+        if (i) i.lastOutput = Date.now();
+      })
+      .on("stderr", line => {
+        fs.appendFileSync(
+          `ffmpeg_${item.id}.log`,
+          `[${new Date().toISOString()}] ${line}\n`
         );
-        
-        ExceptionHandler.trigger(`FFmpeg Spawn Error in ${item.name}`);
+      })
+      .on("error", e => {
+        Logger.error(`❌ ${item.name}: ${e.message}`);
+        StreamManager.handleFailure(item, e.message);
+      })
+      .on("end", () => {
+        Logger.warn(`⏹ ${item.name} ended`);
+        StreamManager.handleFailure(item, "Stream ended");
       });
-
-      ff.unref();
-      
-      return true;
-    } catch (error) {
-      Logger.error(`Failed to start FFmpeg for ${item.name}: ${error.message}`);
-      
-      const errorAnalysis = FfmpegErrorAnalyzer.getDetailedReport(error.message, item.name);
-      Telegram.send(
-        `🚨 FFmpeg Start Failed: ${item.name}\n\n` +
-        `📛 Type: ${errorAnalysis.errorType}\n` +
-        `📋 Details: ${errorAnalysis.errorDetails}\n` +
-        `🛠️ Solution: ${errorAnalysis.solution}`
-      );
-      
-      return false;
-    }
+  
+    activeStreams.set(item.id, {
+      command: cmd,
+      item,
+      lastOutput: Date.now()
+    });
+  
+    cmd.run();
+    
   }
 
-  // Check if message contains error
-  static isErrorMessage(msg) {
-    const errorMsg = msg.toLowerCase();
-    return (
-      errorMsg.includes("error") ||
-      errorMsg.includes("failed") ||
-      errorMsg.includes("connection refused") ||
-      errorMsg.includes("no route to host") ||
-      errorMsg.includes("connection timed out") ||
-      errorMsg.includes("invalid data found") ||
-      errorMsg.includes("server returned") ||
-      errorMsg.includes("input/output error") ||
-      errorMsg.includes("cannot open resource") ||
-      errorMsg.includes("protocol not found") ||
-      errorMsg.includes("404 not found") ||
-      errorMsg.includes("401 unauthorized") ||
-      errorMsg.includes("403 forbidden") ||
-      errorMsg.includes("end of file") ||
-      errorMsg.includes("eof") ||
-      errorMsg.includes("broken pipe") ||
-      errorMsg.includes("access denied")
-    );
-  }
+  static async handleFailure(item, reason) {
+    const r = (streamRetries.get(item.id) || 0) + 1;
+    streamRetries.set(item.id, r);
 
-  // Restart individual stream
-  static async restartStream(streamId, errorReason = "Unknown") {
-    const streamInfo = activeStreams.get(streamId);
-    if (!streamInfo) {
-      Logger.warn(`Cannot restart stream ${streamId}: not found`);
+    if (r <= CONFIG.maxRetries && systemState === "running") {
+      Logger.warn(`🔁 Retry ${item.name}`);
+      await StreamManager.restartSingle(item);
       return;
     }
 
-    const item = streamInfo.item;
-    
-    if (streamInfo.process && !streamInfo.process.killed) {
-      streamInfo.process.kill('SIGTERM');
-    }
-    
-    activeStreams.delete(streamId);
-    
-    try {
-      Logger.info(`Creating new Facebook Live for: ${item.name} (Previous error: ${errorReason})`);
-      const live = await FacebookAPI.createLive(item.token, item.name);
-      item.streamId = live.id;
-      item.rtmps = live.rtmps;
-      
-      // Wait before starting FFmpeg
-      Logger.info(`Waiting before starting FFmpeg for: ${item.name}`);
-      await new Promise(r => setTimeout(r, 5000)); // 5 seconds wait
-      
-      StreamManager.startFFmpeg(item);
-      
-      await Telegram.send(
-        `🔄 Stream Restarted: ${item.name}\n\n` +
-        `📛 Previous error: ${errorReason}\n` +
-        `🆔 New stream ID: ${item.streamId}`
-      );
-      
-    } catch (error) {
-      Logger.error(`Failed to recreate Facebook Live for ${item.name}: ${error.message}`);
-      ExceptionHandler.trigger(`Failed to recreate stream ${item.name}`);
-    }
+    Logger.error(`🛑 ${item.name} stopped permanently`);
+    await Telegram.send(`❌ LIVE STOPPED\n${item.name}\n${reason}`);
+
+    const info = activeStreams.get(item.id);
+    try { info?.command.kill("SIGTERM"); } catch {}
+    activeStreams.delete(item.id);
+  }
+
+  static async restartSingle(item) {
+    const info = activeStreams.get(item.id);
+    try { info?.command.kill("SIGTERM"); } catch {}
+    activeStreams.delete(item.id);
+
+    const live = await FacebookAPI.createLive(item.token, item.name);
+    item.streamId = live.id;
+    item.rtmps = live.rtmps;
+
+    await new Promise(r=>setTimeout(r,3000));
+    StreamManager.startFFmpeg(item);
   }
 
   static stopAll() {
-    activeStreams.forEach((info, id) => {
-      if (info.process && !info.process.killed) {
-        info.process.kill("SIGTERM");
-      }
+    activeStreams.forEach(i=>{
+      try { i.command.kill("SIGTERM"); } catch {}
     });
     activeStreams.clear();
     streamRetries.clear();
   }
-
-  // Health check for streams
-  static async healthCheck() {
-    const now = Date.now();
-    const deadStreams = [];
-    
-    activeStreams.forEach((info, streamId) => {
-      if (info.process && info.process.killed) {
-        Logger.warn(`Stream ${info.item.name} process is killed`);
-        deadStreams.push(streamId);
-      }
-      else if (info.status === "running" && now - info.lastOutput > 60000) {
-        Logger.warn(`Stream ${info.item.name} has no output for 60+ seconds`);
-        deadStreams.push(streamId);
-      }
-    });
-    
-    // Restart dead streams
-    for (const streamId of deadStreams) {
-      const info = activeStreams.get(streamId);
-      if (info && info.retries <= CONFIG.maxRetries) {
-        Logger.info(`Health check: restarting dead stream ${info.item.name}`);
-        await StreamManager.restartStream(streamId, "Health Check");
-      }
-    }
-    
-    return deadStreams.length;
-  }
-
-  // Check if all FFmpeg processes are running
-  static areAllStreamsRunning() {
-    return Array.from(allItems.values()).every(item => {
-      const streamInfo = activeStreams.get(item.id);
-      return streamInfo && streamInfo.status === "running";
-    });
-  }
-
-  // Wait for all streams to be running
-  static async waitForAllStreams(timeout = 90000) { // 90 seconds timeout
-    const start = Date.now();
-    const checkInterval = 2000;
-    
-    while (Date.now() - start < timeout) {
-      if (this.areAllStreamsRunning()) {
-        Logger.success("All streams are running!");
-        return true;
-      }
-      
-      const runningCount = Array.from(allItems.values()).filter(item => {
-        const streamInfo = activeStreams.get(item.id);
-        return streamInfo && streamInfo.status === "running";
-      }).length;
-      
-      Logger.info(`Waiting for streams: ${runningCount}/${allItems.size} running`);
-      
-      await new Promise(r => setTimeout(r, checkInterval));
-    }
-    
-    Logger.warn(`Timeout waiting for all streams to start`);
-    return false;
-  }
 }
 
-// ================== EXCEPTION HANDLER ==================
-class ExceptionHandler {
-  static async trigger(reason) {
-    if (isRestarting) return;
-    isRestarting = true;
+// ================== MAIN SYSTEM ==================
+class System {
 
-    Logger.warn(`Exception: ${reason}`);
-    await Telegram.send(`⚠️ System Exception\n${reason}\n⏳ Restarting in 30 seconds...`);
-
-    setTimeout(async () => {
-      await Main.restart();
-      isRestarting = false;
-    }, CONFIG.restartDelay); // Now only 30 seconds
-  }
-}
-
-// ================== API CHANGE DETECTOR ==================
-class ApiChangeDetector {
-  static createDataHash(data) {
-    const itemsString = data.map(item => 
-      `${item.token}|${item.name}|${item.source}|${item.img}`
-    ).sort().join('||');
-    
-    return Buffer.from(itemsString).toString('base64');
-  }
-
-  static async checkForChanges() {
-    try {
-      Logger.info("Checking API for changes...");
-      
-      const res = await fetch(CONFIG.apiUrl, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        }
-      });
-      const json = await res.json();
-      
-      const newHash = this.createDataHash(json.data);
-      
-      if (apiDataHash === "") {
-        apiDataHash = newHash;
-        Logger.info("Initial API data hash stored");
-        return false;
-      }
-      
-      if (newHash !== apiDataHash) {
-        Logger.info(`API data changed!`);
-        
-        const oldCount = allItems.size;
-        const newCount = json.data.length;
-        await Telegram.send(
-          `🔄 API Changes Detected!\n\n` +
-          `📊 Previous streams: ${oldCount}\n` +
-          `📊 New streams: ${newCount}\n` +
-          `⏳ Restarting in 30 seconds...`
-        );
-        
-        apiDataHash = newHash;
-        ExceptionHandler.trigger("API data changed");
-        return true;
-      }
-      
-      Logger.info("No changes in API data");
-      return false;
-      
-    } catch (error) {
-      Logger.error(`Error checking API changes: ${error.message}`);
-      return false;
-    }
-  }
-}
-
-// ================== MAIN ==================
-class Main {
-  // Fetch data from API
-  static async fetchItems() {
-    const res = await fetch(CONFIG.apiUrl, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-      }
-    });
-    const json = await res.json();
+  static async fetchStreams() {
+    const r = await fetch(CONFIG.streamsApi);
+    const j = await r.json();
 
     const map = new Map();
-    json.data.forEach((it, i) => {
+    j.data.forEach((it,i)=>{
       map.set(`item_${i}`, {
-        id: `item_${i}`,
+        id:`item_${i}`,
         token: it.token,
         name: it.name,
-        source: it.source,
-        img: it.img
+        source: it.source
       });
     });
-    
-    if (apiDataHash === "") {
-      apiDataHash = ApiChangeDetector.createDataHash(json.data);
-    }
-    
-    streamRetries.clear();
-    
     return map;
   }
 
-  // Full startup
   static async start() {
-    try {
-      Logger.info("Fetching items from API...");
-      allItems = await this.fetchItems();
+    if (systemState === "running") return;
 
-      Logger.info(`Creating Facebook Live for ${allItems.size} streams...`);
-      
-      // 1️⃣ Create Facebook Live streams
-      for (const item of allItems.values()) {
-        try {
-          const live = await FacebookAPI.createLive(item.token, item.name);
-          item.streamId = live.id;
-          item.rtmps = live.rtmps;
-          Logger.info(`Created Facebook Live for: ${item.name} (ID: ${item.streamId})`);
-        } catch (error) {
-          Logger.error(`Failed to create Facebook Live for ${item.name}: ${error.message}`);
-          item.failed = true;
-          
-          await Telegram.send(
-            `❌ Facebook Live Creation Failed\n\n` +
-            `📛 Stream: ${item.name}\n` +
-            `📋 Error: ${error.message}`
-          );
-        }
-      }
+    systemState = "running";
+    startTime = Date.now();
 
-      // 2️⃣ Wait 15 seconds before starting FFmpeg
-      Logger.info(`Waiting 15 seconds before starting FFmpeg...`);
-      await new Promise(r => setTimeout(r, CONFIG.preStartDelay));
+    Logger.success("▶ SYSTEM START");
+    await Telegram.send("▶ SYSTEM STARTED");
 
-      // 3️⃣ Start FFmpeg with delays between starts
-      Logger.info("Starting FFmpeg processes...");
-      let ffmpegStarted = 0;
-      
-      for (const item of allItems.values()) {
-        if (!item.failed) {
-          if (ffmpegStarted > 0) {
-            await new Promise(r => setTimeout(r, CONFIG.ffmpegStartDelay));
-          }
-          
-          StreamManager.startFFmpeg(item);
-          ffmpegStarted++;
-        }
-      }
+    allItems = await this.fetchStreams();
 
-      // 4️⃣ Wait for ALL streams to be running
-      Logger.info("Waiting for all FFmpeg processes to start...");
-      const allRunning = await StreamManager.waitForAllStreams();
-      
-      if (!allRunning) {
-        throw new Error("Failed to start all streams");
-      }
-
-      // 5️⃣ Get DASH URLs (MPD) for all successful streams
-      Logger.info("All streams running, fetching DASH URLs...");
-      let report = `📊 STREAM REPORT\n\n`;
-      let successCount = 0;
-      
-      for (const item of allItems.values()) {
-        if (!item.failed) {
-          try {
-            item.dash = await FacebookAPI.getDash(item.streamId, item.token);
-            
-            report += `✅ ${item.name}\n`;
-            report += `🔗 DASH (MPD): ${item.dash}\n`;
-            report += `🆔 Facebook ID: ${item.streamId}\n\n`;
-            
-            successCount++;
-            
-          } catch (error) {
-            report += `⚠️ ${item.name} - Failed to get DASH: ${error.message}\n\n`;
-          }
-        } else {
-          report += `❌ ${item.name} - Failed to create Facebook Live\n\n`;
-        }
-      }
-
-      report += `📈 Total: ${successCount}/${allItems.size} streams running`;
-      
-      // 6️⃣ Send Telegram report
-      await Telegram.send(report);
-      Logger.success(`All streams initialized: ${successCount}/${allItems.size} successful`);
-
-    } catch (error) {
-      Logger.error(`Startup error: ${error.message}`);
-      throw error;
+    for (const item of allItems.values()) {
+      const live = await FacebookAPI.createLive(item.token, item.name);
+      item.streamId = live.id;
+      item.rtmps = live.rtmps;
+      StreamManager.startFFmpeg(item);
+      await new Promise(r=>setTimeout(r,2000));
     }
+
+    if (globalRestartTimer) clearTimeout(globalRestartTimer);
+    globalRestartTimer = setTimeout(()=>{
+      System.restart("Scheduled 3h45m restart");
+    }, CONFIG.globalRestartAfter);
   }
 
-  static async restart() {
-    Logger.warn("Restarting system...");
+  static async stop(reason="Manual stop") {
+    if (systemState === "stopped") return;
+
+    Logger.warn("⛔ SYSTEM STOP");
+    await Telegram.send(`⛔ SYSTEM STOPPED\n${reason}`);
+
+    systemState = "stopped";
     StreamManager.stopAll();
-    await this.start();
+
+    if (globalRestartTimer) clearTimeout(globalRestartTimer);
+  }
+
+  static async restart(reason) {
+    Logger.warn("♻ SYSTEM RESTART");
+    await Telegram.send(`♻ SYSTEM RESTART\n${reason}`);
+
+    systemState = "restarting";
+    StreamManager.stopAll();
+
+    setTimeout(async ()=>{
+      await System.start();
+    }, CONFIG.restartDelay);
   }
 }
 
-// ================== PERIODIC CHECKS ==================
+// ================== CONTROL API POLLER ==================
+setInterval(async ()=>{
+  try {
+    const r = await fetch(CONFIG.controlApi);
+    const j = await r.json();
 
-// 📊 Status report every 5 minutes
-setInterval(async () => {
-  if (!isRestarting) {
-    const uptime = Math.floor((Date.now() - startTime) / 60000);
-    const activeCount = Array.from(activeStreams.values())
-      .filter(info => info.status === "running").length;
-    
-    await Telegram.send(
-      `📡 Status Report\n\n` +
-      `⏱️ Uptime: ${uptime} minutes\n` +
-      `📊 Total streams: ${allItems.size}\n` +
-      `🟢 Active streams: ${activeCount}\n` +
-      `🔴 Inactive streams: ${allItems.size - activeCount}\n` +
-      `🔄 Last check: ${new Date().toLocaleTimeString()}`
-    );
-  }
-}, CONFIG.reportInterval);
+    if (j.action === "start") await System.start();
+    if (j.action === "stop") await System.stop("Control API");
+    if (j.action === "restart") await System.restart("Control API");
 
-// 🔍 API change check every minute
-setInterval(async () => {
-  if (!isRestarting) {
-    await ApiChangeDetector.checkForChanges();
-  } else {
-    Logger.info("Skipping API check - system is restarting");
-  }
-}, CONFIG.pollInterval);
+  } catch {}
+}, CONFIG.controlPollInterval);
 
-// 🩺 Health check every 30 seconds
-setInterval(async () => {
-  if (!isRestarting) {
-    const deadCount = await StreamManager.healthCheck();
-    if (deadCount > 0) {
-      Logger.info(`Health check: Found ${deadCount} dead streams`);
+// ================== HEALTH CHECK ==================
+setInterval(()=>{
+  if (systemState !== "running") return;
+
+  const now = Date.now();
+  activeStreams.forEach(info=>{
+    if (now - info.lastOutput > 60_000) {
+      StreamManager.handleFailure(info.item, "No output 60s");
     }
-  }
+  });
 }, CONFIG.healthCheckInterval);
 
-// ================== START ==================
-Main.start().catch(e => {
-  Logger.error(`Initial error: ${e.message}`);
-  ExceptionHandler.trigger("Initial Error");
-});
+// ================== STATUS REPORT ==================
+setInterval(async ()=>{
+  if (systemState !== "running") return;
+
+  const up = Math.floor((Date.now()-startTime)/60000);
+  await Telegram.send(
+    `📡 STATUS\nUptime: ${up} min\nActive: ${activeStreams.size}`
+  );
+}, CONFIG.reportInterval);
+
+// ================== BOOT ==================
+Logger.success("🟡 SYSTEM READY – WAITING FOR START");
