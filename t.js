@@ -19,9 +19,9 @@ import fs from "fs";
 const CONFIG = {
   apiUrl: "https://ani-box-nine.vercel.app/api/grok-chat",
 
-  pollInterval: 60_000,          // Check every minute for API changes
-  restartDelay: 2 * 60_000,      // ⏳ Wait 2 minutes after any exception
-  reportInterval: 5 * 60_000,    // 📊 Telegram report every 5 minutes
+  pollInterval: 60_000,          // فحص دوري كل دقيقة
+  restartDelay: 1 * 60_000,      // ⏳ انتظار دقيقتين بعد أي استثناء
+  reportInterval: 5 * 60_000,    // 📊 تقرير Telegram كل 5 دقائق
 
   telegram: {
     botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",
@@ -30,11 +30,10 @@ const CONFIG = {
 };
 
 // ================== GLOBAL STATE ==================
-let allItems = new Map();        // All streams
-let activeStreams = new Map();   // FFmpeg processes
+let allItems = new Map();        // جميع البثوث
+let activeStreams = new Map();  // FFmpeg processes
 let isRestarting = false;
 let startTime = Date.now();
-let apiDataHash = "";           // Store hash of API data to detect changes
 
 // ================== LOGGER ==================
 class Logger {
@@ -67,7 +66,8 @@ class Telegram {
 
 // ================== FACEBOOK ==================
 class FacebookAPI {
-  // Create Facebook Live
+
+  // إنشاء بث Facebook
   static async createLive(token, name) {
     const res = await fetch(
       "https://graph.facebook.com/v24.0/me/live_videos",
@@ -89,7 +89,7 @@ class FacebookAPI {
     };
   }
 
-  // Get DASH after FFmpeg starts
+  // جلب DASH بعد تشغيل FFmpeg
   static async getDash(id, token) {
     const res = await fetch(
       `https://graph.facebook.com/v24.0/${id}?fields=dash_preview_url&access_token=${token}`
@@ -101,6 +101,7 @@ class FacebookAPI {
 
 // ================== STREAM MANAGER ==================
 class StreamManager {
+
   static startFFmpeg(item) {
     Logger.info(`Starting FFmpeg: ${item.name}`);
 
@@ -150,73 +151,10 @@ class ExceptionHandler {
   }
 }
 
-// ================== API CHANGE DETECTOR ==================
-class ApiChangeDetector {
-  // Create a hash of API data to detect changes
-  static createDataHash(data) {
-    // Create a string from all items data
-    const itemsString = data.map(item => 
-      `${item.token}|${item.name}|${item.source}|${item.img}`
-    ).sort().join('||');
-    
-    // Create hash from the string
-    return Buffer.from(itemsString).toString('base64');
-  }
-
-  // Check if API data has changed
-  static async checkForChanges() {
-    try {
-      Logger.info("Checking API for changes...");
-      
-      // Fetch fresh data from API
-      const res = await fetch(CONFIG.apiUrl);
-      const json = await res.json();
-      
-      // Create hash of new data
-      const newHash = this.createDataHash(json.data);
-      
-      // If this is the first time, just store the hash
-      if (apiDataHash === "") {
-        apiDataHash = newHash;
-        Logger.info("Initial API data hash stored");
-        return false;
-      }
-      
-      // Compare hashes
-      if (newHash !== apiDataHash) {
-        Logger.info(`API data changed! Old hash: ${apiDataHash.slice(0, 20)}..., New hash: ${newHash.slice(0, 20)}...`);
-        
-        // Send Telegram notification about the change
-        const oldCount = allItems.size;
-        const newCount = json.data.length;
-        await Telegram.send(
-          `🔄 API Changes Detected!\n\n` +
-          `📊 Previous streams: ${oldCount}\n` +
-          `📊 New streams: ${newCount}\n` +
-          `⏳ Restarting in 2 minutes...`
-        );
-        
-        // Update hash
-        apiDataHash = newHash;
-        
-        // Trigger restart
-        ExceptionHandler.trigger("API data changed");
-        return true;
-      }
-      
-      Logger.info("No changes in API data");
-      return false;
-      
-    } catch (error) {
-      Logger.error(`Error checking API changes: ${error.message}`);
-      return false;
-    }
-  }
-}
-
 // ================== MAIN ==================
 class Main {
-  // Fetch data from API
+
+  // جلب البيانات من API
   static async fetchItems() {
     const res = await fetch(CONFIG.apiUrl);
     const json = await res.json();
@@ -231,36 +169,30 @@ class Main {
         img: it.img
       });
     });
-    
-    // Store initial hash
-    if (apiDataHash === "") {
-      apiDataHash = ApiChangeDetector.createDataHash(json.data);
-    }
-    
     return map;
   }
 
-  // Full startup
+  // التشغيل الكامل
   static async start() {
     Logger.info("Fetching items...");
     allItems = await this.fetchItems();
 
-    // 1️⃣ Create Facebook Live streams
+    // 1️⃣ إنشاء بثوث Facebook
     for (const item of allItems.values()) {
       const live = await FacebookAPI.createLive(item.token, item.name);
       item.streamId = live.id;
       item.rtmps = live.rtmps;
     }
 
-    // 2️⃣ Start FFmpeg
+    // 2️⃣ تشغيل FFmpeg
     for (const item of allItems.values()) {
       StreamManager.startFFmpeg(item);
     }
 
-    // 3️⃣ Wait for all to start
+    // 3️⃣ انتظار حتى يشتغل الجميع
     await new Promise(r => setTimeout(r, 8000));
 
-    // 4️⃣ Get DASH + Send report
+    // 4️⃣ جلب DASH + إرسال تقرير
     let report = `📊 STREAM REPORT\n\n`;
     for (const item of allItems.values()) {
       item.dash = await FacebookAPI.getDash(item.streamId, item.token);
@@ -278,22 +210,11 @@ class Main {
   }
 }
 
-// ================== PERIODIC CHECKS ==================
-
-// 📊 Status report every 5 minutes
+// ================== REPORT LOOP ==================
 setInterval(async () => {
   const uptime = Math.floor((Date.now() - startTime) / 60000);
   await Telegram.send(`📡 Status OK\nUptime: ${uptime} minutes\nStreams: ${allItems.size}`);
 }, CONFIG.reportInterval);
-
-// 🔍 API change check every minute
-setInterval(async () => {
-  if (!isRestarting) {
-    await ApiChangeDetector.checkForChanges();
-  } else {
-    Logger.info("Skipping API check - system is restarting");
-  }
-}, CONFIG.pollInterval);
 
 // ================== START ==================
 Main.start().catch(e => {
