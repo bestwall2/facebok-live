@@ -1,35 +1,40 @@
 /******************************************************************
- * FACEBOOK MULTI STREAM MANAGER (Enhanced)
+ * FACEBOOK MULTI STREAM MANAGER
  * Author: You
- * Features:
- * - Monitor API for any changes every minute
- * - Restart all streams on any change
- * - Collect DASH URLs only after FFmpeg is running
- * - Telegram report every 5 minutes with full details
- * - Handles FFmpeg crashes
+ * Description:
+ * - Fetch streams from API
+ * - Create Facebook Live
+ * - Start FFmpeg
+ * - Wait for ALL streams to be running
+ * - Then fetch DASH URLs
+ * - Send full Telegram reports
+ * - Handle exceptions with delay
  ******************************************************************/
 
+// ================== IMPORTS ==================
 import { spawn } from "child_process";
 import fs from "fs";
 
 // ================== CONFIG ==================
 const CONFIG = {
   apiUrl: "https://ani-box-nine.vercel.app/api/grok-chat",
-  pollInterval: 60_000,         // Check API every 1 minute
-  restartDelay: 2 * 60_000,     // Wait 2 minutes before restarting after exception
-  reportInterval: 5 * 60_000,   // Send Telegram report every 5 minutes
+
+  pollInterval: 60_000,          // فحص دوري كل دقيقة
+  restartDelay: 2 * 60_000,      // ⏳ انتظار دقيقتين بعد أي استثناء
+  reportInterval: 5 * 60_000,    // 📊 تقرير Telegram كل 5 دقائق
+
   telegram: {
-    botTokens: ["7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE"], // يمكنك إضافة أكثر من توكن
-    chatIds: ["5806630118","6605454954"], // يمكن إضافة أكثر من chatId
+    botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",
+    // دعم متعدد الشات IDs
+    chatIds: ["5806630118","6605454954"], // يمكن إضافة المزيد: ["5806630118", "شات_آخر", "شات_ثالث"]
   }
 };
 
 // ================== GLOBAL STATE ==================
-let allItems = new Map();         // جميع البثوث الحالية
-let activeStreams = new Map();    // FFmpeg processes
-let isRestarting = false;         // لتجنب إعادة التشغيل المتعددة
-let startTime = Date.now();       // وقت بدء التطبيق
-let changeLog = [];               // لتسجيل كل التغيرات خلال 5 دقائق
+let allItems = new Map();        // جميع البثوث
+let activeStreams = new Map();  // FFmpeg processes
+let isRestarting = false;
+let startTime = Date.now();
 
 // ================== LOGGER ==================
 class Logger {
@@ -46,27 +51,49 @@ class Logger {
 
 // ================== TELEGRAM ==================
 class Telegram {
+  // إرسال إلى جميع الشات IDs
   static async send(text) {
-    for (let i = 0; i < CONFIG.telegram.botTokens.length; i++) {
-      for (let j = 0; j < CONFIG.telegram.chatIds.length; j++) {
-        const url = `https://api.telegram.org/bot${CONFIG.telegram.botTokens[i]}/sendMessage`;
+    const sendPromises = CONFIG.telegram.chatIds.map(async (chatId) => {
+      const url = `https://api.telegram.org/bot${CONFIG.telegram.botToken}/sendMessage`;
+      try {
         await fetch(url, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            chat_id: CONFIG.telegram.chatIds[j],
+            chat_id: chatId,
             text,
             parse_mode: "HTML"
           })
         });
+      } catch (error) {
+        Logger.error(`فشل الإرسال إلى ${chatId}: ${error.message}`);
       }
-    }
+    });
+    
+    await Promise.all(sendPromises);
+  }
+
+  // إرسال تقرير الحالة
+  static async sendStatus() {
+    const uptime = Math.floor((Date.now() - startTime) / 60000);
+    const activeCount = Array.from(allItems.values()).filter(item => 
+      activeStreams.has(item.id) && !activeStreams.get(item.id).killed
+    ).length;
+    
+    const status = `📡 **حالة النظام**\n\n` +
+                   `⏱️ وقت التشغيل: ${uptime} دقيقة\n` +
+                   `📊 عدد البثوث الكلي: ${allItems.size}\n` +
+                   `🟢 البثوث النشطة: ${activeCount}\n` +
+                   `🔴 البثوث المعطلة: ${allItems.size - activeCount}\n` +
+                   `🔄 آخر تحديث: ${new Date().toLocaleTimeString()}`;
+    
+    await this.send(status);
   }
 }
 
 // ================== FACEBOOK ==================
 class FacebookAPI {
-
+  // إنشاء بث Facebook
   static async createLive(token, name) {
     const res = await fetch(
       "https://graph.facebook.com/v24.0/me/live_videos",
@@ -82,9 +109,13 @@ class FacebookAPI {
     );
     const json = await res.json();
     if (json.error) throw new Error(json.error.message);
-    return { id: json.id, rtmps: json.secure_stream_url };
+    return {
+      id: json.id,
+      rtmps: json.secure_stream_url
+    };
   }
 
+  // جلب DASH بعد تشغيل FFmpeg
   static async getDash(id, token) {
     const res = await fetch(
       `https://graph.facebook.com/v24.0/${id}?fields=dash_preview_url&access_token=${token}`
@@ -96,31 +127,57 @@ class FacebookAPI {
 
 // ================== STREAM MANAGER ==================
 class StreamManager {
-
   static startFFmpeg(item) {
     Logger.info(`Starting FFmpeg: ${item.name}`);
-    const ff = spawn("ffmpeg", ["-re", "-i", item.source, "-c", "copy", "-f", "flv", item.rtmps]);
-    activeStreams.set(item.id, ff);
+
+    const ff = spawn("ffmpeg", [
+      "-re",
+      "-i", item.source,
+      "-c", "copy",
+      "-f", "flv",
+      item.rtmps
+    ]);
+
+    activeStreams.set(item.id, {
+      process: ff,
+      startTime: Date.now(),
+      status: "running"
+    });
 
     ff.stderr.on("data", d => {
       const msg = d.toString();
-      if (msg.toLowerCase().includes("error")) {
-        Logger.error(`FFmpeg error: ${item.name}`);
-        changeLog.push(`⚠️ FFmpeg error for ${item.name}`);
-        ExceptionHandler.trigger("FFmpeg Error");
+      if (msg.includes("error") || msg.includes("failed")) {
+        Logger.error(`FFmpeg error [${item.name}]: ${msg.slice(0, 200)}`);
+        ExceptionHandler.trigger(`FFmpeg Error في ${item.name}`);
       }
     });
 
     ff.on("exit", code => {
-      Logger.warn(`FFmpeg exited (${code}) - ${item.name}`);
-      changeLog.push(`⚠️ FFmpeg exited for ${item.name}`);
-      ExceptionHandler.trigger("FFmpeg Exit");
+      Logger.warn(`FFmpeg exited [${item.name}]: code ${code}`);
+      const streamInfo = activeStreams.get(item.id);
+      if (streamInfo) {
+        streamInfo.status = "stopped";
+        streamInfo.exitCode = code;
+        streamInfo.stopTime = Date.now();
+      }
+      ExceptionHandler.trigger(`FFmpeg خرج في ${item.name}`);
     });
   }
 
   static stopAll() {
-    activeStreams.forEach(p => p.kill("SIGTERM"));
+    activeStreams.forEach((info, id) => {
+      if (info.process && !info.process.killed) {
+        info.process.kill("SIGTERM");
+      }
+    });
     activeStreams.clear();
+  }
+
+  static async checkAllRunning() {
+    return Array.from(allItems.values()).every(item => 
+      activeStreams.has(item.id) && 
+      activeStreams.get(item.id).status === "running"
+    );
   }
 }
 
@@ -131,8 +188,7 @@ class ExceptionHandler {
     isRestarting = true;
 
     Logger.warn(`Exception: ${reason}`);
-    changeLog.push(`⚠️ Exception triggered: ${reason}`);
-    await Telegram.send(`⚠️ Exception detected\n${reason}\n⏳ Restart in 2 minutes`);
+    await Telegram.send(`⚠️ استثناء مكتشف\n${reason}\n⏳ إعادة التشغيل خلال دقيقتين`);
 
     setTimeout(async () => {
       await Main.restart();
@@ -141,100 +197,190 @@ class ExceptionHandler {
   }
 }
 
+// ================== ITEMS COMPARATOR ==================
+class ItemsComparator {
+  // مقارنة العناصر القديمة بالجديدة لاكتشاف التغيرات
+  static hasChanges(oldItems, newItems) {
+    if (oldItems.size !== newItems.size) {
+      Logger.info(`تغير في العدد: ${oldItems.size} → ${newItems.size}`);
+      return true;
+    }
+
+    // مقارنة كل عنصر
+    for (const [id, oldItem] of oldItems) {
+      const newItem = newItems.get(id);
+      if (!newItem) {
+        Logger.info(`عنصر محذوف: ${oldItem.name}`);
+        return true;
+      }
+
+      // مقارنة الحقول المهمة
+      if (oldItem.source !== newItem.source || 
+          oldItem.name !== newItem.name || 
+          oldItem.token !== newItem.token) {
+        Logger.info(`تغير في العنصر: ${oldItem.name}`);
+        return true;
+      }
+    }
+
+    // التحقق من عناصر جديدة
+    for (const [id, newItem] of newItems) {
+      if (!oldItems.has(id)) {
+        Logger.info(`عنصر جديد: ${newItem.name}`);
+        return true;
+      }
+    }
+
+    return false;
+  }
+}
+
+// ================== POLLING SYSTEM ==================
+class PollingSystem {
+  static lastItemsHash = "";
+  
+  // إنشاء بصمة للعناصر لاكتشاف التغيرات
+  static createItemsHash(items) {
+    const itemsArray = Array.from(items.values())
+      .map(item => `${item.source}|${item.name}|${item.token}`)
+      .sort()
+      .join('||');
+    
+    return Buffer.from(itemsArray).toString('base64');
+  }
+
+  static async pollForChanges() {
+    if (isRestarting) {
+      Logger.info("تخطي الفحص بسبب إعادة التشغيل");
+      return;
+    }
+
+    try {
+      Logger.info("🔍 فحص دوري للعناصر...");
+      const newItems = await Main.fetchItems();
+      const newHash = this.createItemsHash(newItems);
+      
+      if (newHash !== this.lastItemsHash) {
+        Logger.info("🔄 تغيير مكتشف! إعادة التشغيل...");
+        
+        // إرسال إشعار بالتغيير
+        const oldCount = allItems.size;
+        const newCount = newItems.size;
+        await Telegram.send(
+          `🔄 **تم اكتشاف تغيير في البثوث**\n\n` +
+          `📊 العدد السابق: ${oldCount}\n` +
+          `📊 العدد الجديد: ${newCount}\n` +
+          `⏳ جاري إعادة التشغيل...`
+        );
+        
+        // إعادة التشغيل
+        this.lastItemsHash = newHash;
+        ExceptionHandler.trigger("تغيير في العناصر من API");
+      } else {
+        Logger.info("✅ لا يوجد تغييرات");
+      }
+    } catch (error) {
+      Logger.error(`خطأ في الفحص الدوري: ${error.message}`);
+    }
+  }
+}
+
 // ================== MAIN ==================
 class Main {
-
+  // جلب البيانات من API
   static async fetchItems() {
     const res = await fetch(CONFIG.apiUrl);
     const json = await res.json();
+
     const map = new Map();
     json.data.forEach((it, i) => {
-      map.set(`item_${i}`, {
-        id: `item_${i}`,
+      // إنشاء ID فريد بناءً على المصدر والاسم
+      const itemId = `item_${Buffer.from(`${it.source}|${it.name}`).toString('base64').slice(0, 10)}`;
+      
+      map.set(itemId, {
+        id: itemId,
         token: it.token,
         name: it.name,
         source: it.source,
-        img: it.img
+        img: it.img,
+        addedTime: Date.now()
       });
     });
     return map;
   }
 
+  // التشغيل الكامل
   static async start() {
-    Logger.info("Fetching items...");
-    const newItems = await this.fetchItems();
-
-    // مقارنة مع العناصر السابقة
-    this.detectChanges(allItems, newItems);
-    allItems = newItems;
-
-    // إنشاء بثوث Facebook
-    for (const item of allItems.values()) {
-      const live = await FacebookAPI.createLive(item.token, item.name);
-      item.streamId = live.id;
-      item.rtmps = live.rtmps;
-    }
-
-    // تشغيل FFmpeg
-    for (const item of allItems.values()) StreamManager.startFFmpeg(item);
-
-    // انتظار الجميع
-    await new Promise(r => setTimeout(r, 8000));
-
-    // جلب DASH URLs
-    let report = `📊 STREAM REPORT\n\n`;
-    for (const item of allItems.values()) {
-      item.dash = await FacebookAPI.getDash(item.streamId, item.token);
-      report += `📺 ${item.name}\nDASH: ${item.dash}\n\n`;
-    }
-    changeLog.push(report);
-    await Telegram.send(report);
-
-    Logger.success("All streams running");
-  }
-
-  static async restart() {
-    Logger.warn("Restarting system...");
-    StreamManager.stopAll();
-    await this.start();
-  }
-
-  // مقارنة التغييرات في API
-  static detectChanges(oldItems, newItems) {
-    oldItems.forEach((oldItem, id) => {
-      if (!newItems.has(id)) changeLog.push(`❌ Removed: ${oldItem.name}`);
-    });
-
-    newItems.forEach((newItem, id) => {
-      const oldItem = oldItems.get(id);
-      if (!oldItem) {
-        changeLog.push(`🆕 Added: ${newItem.name}`);
-        ExceptionHandler.trigger("New Item Added");
-      } else if (
-        oldItem.token !== newItem.token ||
-        oldItem.name !== newItem.name ||
-        oldItem.source !== newItem.source ||
-        oldItem.img !== newItem.img
-      ) {
-        changeLog.push(`✏️ Updated: ${newItem.name}`);
-        ExceptionHandler.trigger("Item Updated");
+    try {
+      Logger.info("جلب العناصر...");
+      allItems = await this.fetchItems();
+      
+      if (allItems.size === 0) {
+        Logger.warn("لا توجد عناصر في API");
+        await Telegram.send("⚠️ **تحذير**: لا توجد بثوث في API");
+        return;
       }
-    });
-  }
-}
 
-// ================== TELEGRAM REPORT LOOP ==================
-setInterval(async () => {
-  if (changeLog.length === 0) return;
-  const uptime = Math.floor((Date.now() - startTime) / 60000);
-  let msg = `📡 STATUS REPORT\nUptime: ${uptime} minutes\n\n`;
-  msg += changeLog.join("\n\n");
-  await Telegram.send(msg);
-  changeLog = []; // إعادة تعيين
-}, CONFIG.reportInterval);
+      // 1️⃣ إنشاء بثوث Facebook
+      const creationPromises = Array.from(allItems.values()).map(async (item) => {
+        try {
+          const live = await FacebookAPI.createLive(item.token, item.name);
+          item.streamId = live.id;
+          item.rtmps = live.rtmps;
+          Logger.info(`تم إنشاء بث: ${item.name}`);
+        } catch (error) {
+          Logger.error(`فشل إنشاء بث لـ ${item.name}: ${error.message}`);
+          item.failed = true;
+        }
+      });
 
-// ================== START ==================
-Main.start().catch(e => {
-  Logger.error(e.message);
-  ExceptionHandler.trigger("Fatal Error");
-});
+      await Promise.all(creationPromises);
+
+      // التحقق من وجود بثوث ناجحة
+      const successfulItems = Array.from(allItems.values()).filter(item => !item.failed);
+      if (successfulItems.length === 0) {
+        throw new Error("فشل إنشاء جميع البثوث");
+      }
+
+      // 2️⃣ تشغيل FFmpeg
+      successfulItems.forEach(item => {
+        StreamManager.startFFmpeg(item);
+      });
+
+      // 3️⃣ انتظار حتى يشتغل الجميع
+      let attempts = 0;
+      const maxAttempts = 30; // 30 * 2 ثانية = 60 ثانية كحد أقصى
+      
+      while (attempts < maxAttempts) {
+        const allRunning = await StreamManager.checkAllRunning();
+        if (allRunning) break;
+        
+        await new Promise(r => setTimeout(r, 2000));
+        attempts++;
+      }
+
+      // 4️⃣ جلب DASH + إرسال تقرير
+      let report = `📊 **تقرير البثوث**\n\n`;
+      let successCount = 0;
+      
+      for (const item of successfulItems) {
+        try {
+          if (activeStreams.get(item.id)?.status === "running") {
+            item.dash = await FacebookAPI.getDash(item.streamId, item.token);
+            report += `✅ **${item.name}**\n🔗 ${item.dash}\n\n`;
+            successCount++;
+          } else {
+            report += `❌ **${item.name}** (متوقف)\n\n`;
+          }
+        } catch (error) {
+          report += `⚠️ **${item.name}** (خطأ: ${error.message})\n\n`;
+        }
+      }
+
+      report += `📈 **المجموع**: ${successCount}/${successfulItems.length} بث ناجح`;
+      
+      await Telegram.send(report);
+      Logger.success(`جميع البثوث شغالة: ${successCount}/${allItems.size}`);
+
+      // تحديث بصمة العناصر
+      Polling
