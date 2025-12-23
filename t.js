@@ -1,240 +1,223 @@
+/******************************************************************
+ * FACEBOOK MULTI STREAM MANAGER
+ * Author: You
+ * Description:
+ * - Fetch streams from API
+ * - Create Facebook Live
+ * - Start FFmpeg
+ * - Wait for ALL streams to be running
+ * - Then fetch DASH URLs
+ * - Send full Telegram reports
+ * - Handle exceptions with delay
+ ******************************************************************/
+
 // ================== IMPORTS ==================
 import { spawn } from "child_process";
-import { writeFileSync, appendFileSync } from "fs";
+import fs from "fs";
 
 // ================== CONFIG ==================
 const CONFIG = {
   apiUrl: "https://ani-box-nine.vercel.app/api/grok-chat",
-  pollInterval: 60000,
-  restartDelay: 3000,
+
+  pollInterval: 60_000,          // فحص دوري كل دقيقة
+  restartDelay: 2 * 60_000,      // ⏳ انتظار دقيقتين بعد أي استثناء
+  reportInterval: 5 * 60_000,    // 📊 تقرير Telegram كل 5 دقائق
 
   telegram: {
     botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",
     chatId: "5806630118",
-    reportInterval: 5 * 60 * 1000,
-  },
+  }
 };
 
 // ================== GLOBAL STATE ==================
-let allItems = new Map();
-let activeStreams = new Map();
+let allItems = new Map();        // جميع البثوث
+let activeStreams = new Map();  // FFmpeg processes
 let isRestarting = false;
-
-const STATS = {
-  startTime: Date.now(),
-  restarts: 0,
-  errors: 0,
-};
+let startTime = Date.now();
 
 // ================== LOGGER ==================
 class Logger {
-  static log(level, msg, id = "") {
-    const line = `[${new Date().toISOString()}] [${level}] ${id} ${msg}`;
+  static log(level, msg) {
+    const line = `[${new Date().toISOString()}] [${level}] ${msg}`;
     console.log(line);
-    appendFileSync("app.log", line + "\n");
-    if (level === "ERROR") STATS.errors++;
+    fs.appendFileSync("logs.txt", line + "\n");
   }
-  static info(m, i) { this.log("INFO", m, i); }
-  static warn(m, i) { this.log("WARN", m, i); }
-  static error(m, i) { this.log("ERROR", m, i); }
-  static success(m, i) { this.log("SUCCESS", m, i); }
+  static info(m) { this.log("INFO", m); }
+  static warn(m) { this.log("WARN", m); }
+  static error(m) { this.log("ERROR", m); }
+  static success(m) { this.log("SUCCESS", m); }
 }
 
 // ================== TELEGRAM ==================
 class Telegram {
   static async send(text) {
-    try {
-      await fetch(
-        `https://api.telegram.org/bot${CONFIG.telegram.botToken}/sendMessage`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            chat_id: CONFIG.telegram.chatId,
-            text,
-            parse_mode: "HTML",
-          }),
-        }
-      );
-    } catch {}
-  }
-
-  static async sendEvent(title, body) {
-    await this.send(
-`🚨 <b>${title}</b>
-
-${body}
-
-⏱ ${new Date().toLocaleString()}`
-    );
-  }
-
-  static async sendFullReport() {
-    const uptime = Math.floor((Date.now() - STATS.startTime) / 60000);
-    const running = [...activeStreams.values()].filter(s => s.running);
-
-    let msg = `
-📊 <b>STREAM STATUS REPORT</b>
-
-⏱ Uptime: ${uptime} min
-📡 Streams: ${running.length}/${allItems.size}
-🔁 Restarts: ${STATS.restarts}
-❌ Errors: ${STATS.errors}
-
-📺 <b>Live Streams:</b>
-`;
-
-    running.forEach(s => {
-      msg += `• ${s.name}\n`;
-    });
-
-    msg += `\n📦 DASH URLs:\n`;
-    running.forEach(s => {
-      if (s.dashUrl) msg += `• ${s.name}\n${s.dashUrl}\n\n`;
-    });
-
-    await this.send(msg);
-  }
-}
-
-// ================== FACEBOOK API ==================
-class FacebookAPI {
-  static async createLive(token, name) {
-    const r = await fetch("https://graph.facebook.com/v24.0/me/live_videos", {
+    const url = `https://api.telegram.org/bot${CONFIG.telegram.botToken}/sendMessage`;
+    await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        title: name,
-        status: "UNPUBLISHED",
-        access_token: token,
-      }),
+        chat_id: CONFIG.telegram.chatId,
+        text,
+        parse_mode: "HTML"
+      })
     });
-    const j = await r.json();
-    if (j.error) throw new Error(j.error.message);
-    return { id: j.id, rtmps: j.secure_stream_url };
+  }
+}
+
+// ================== FACEBOOK ==================
+class FacebookAPI {
+
+  // إنشاء بث Facebook
+  static async createLive(token, name) {
+    const res = await fetch(
+      "https://graph.facebook.com/v24.0/me/live_videos",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          title: name,
+          status: "UNPUBLISHED",
+          access_token: token
+        })
+      }
+    );
+    const json = await res.json();
+    if (json.error) throw new Error(json.error.message);
+    return {
+      id: json.id,
+      rtmps: json.secure_stream_url
+    };
   }
 
+  // جلب DASH بعد تشغيل FFmpeg
   static async getDash(id, token) {
-    const r = await fetch(
+    const res = await fetch(
       `https://graph.facebook.com/v24.0/${id}?fields=dash_preview_url&access_token=${token}`
     );
-    const j = await r.json();
-    return j.dash_preview_url || null;
+    const json = await res.json();
+    return json.dash_preview_url;
   }
 }
 
 // ================== STREAM MANAGER ==================
 class StreamManager {
-  static start(item) {
-    Logger.info("Starting FFmpeg", item.id);
+
+  static startFFmpeg(item) {
+    Logger.info(`Starting FFmpeg: ${item.name}`);
 
     const ff = spawn("ffmpeg", [
       "-re",
       "-i", item.source,
       "-c", "copy",
       "-f", "flv",
-      item.rtmps,
+      item.rtmps
     ]);
 
-    activeStreams.set(item.id, {
-      ...item,
-      process: ff,
-      running: true,
-      dashUrl: null,
-    });
+    activeStreams.set(item.id, ff);
 
     ff.stderr.on("data", d => {
-      if (d.toString().includes("error")) {
-        Logger.error("FFmpeg error", item.id);
-        this.handleCrash(item.id);
+      const msg = d.toString();
+      if (msg.includes("error")) {
+        Logger.error(`FFmpeg error: ${item.name}`);
+        ExceptionHandler.trigger("FFmpeg Error");
       }
     });
 
-    ff.on("close", () => {
-      Logger.warn("FFmpeg stopped", item.id);
-      this.handleCrash(item.id);
+    ff.on("exit", code => {
+      Logger.warn(`FFmpeg exited (${code})`);
+      ExceptionHandler.trigger("FFmpeg Exit");
     });
   }
 
-  static handleCrash(id) {
-    if (!isRestarting) {
-      Telegram.sendEvent("Stream Crashed", `Stream ID: ${id}`);
-      Main.restart();
-    }
+  static stopAll() {
+    activeStreams.forEach(p => p.kill("SIGTERM"));
+    activeStreams.clear();
   }
+}
 
-  static allRunning() {
-    return [...activeStreams.values()].every(s => s.running);
+// ================== EXCEPTION HANDLER ==================
+class ExceptionHandler {
+  static async trigger(reason) {
+    if (isRestarting) return;
+    isRestarting = true;
+
+    Logger.warn(`Exception: ${reason}`);
+    await Telegram.send(`⚠️ Exception detected\n${reason}\n⏳ Restart in 2 minutes`);
+
+    setTimeout(async () => {
+      await Main.restart();
+      isRestarting = false;
+    }, CONFIG.restartDelay);
   }
 }
 
 // ================== MAIN ==================
 class Main {
-  static async fetchItems() {
-    const r = await fetch(CONFIG.apiUrl);
-    const j = await r.json();
-    const map = new Map();
 
-    j.data.forEach((it, i) => {
-      map.set(it.name + i, {
-        id: it.name + i,
+  // جلب البيانات من API
+  static async fetchItems() {
+    const res = await fetch(CONFIG.apiUrl);
+    const json = await res.json();
+
+    const map = new Map();
+    json.data.forEach((it, i) => {
+      map.set(`item_${i}`, {
+        id: `item_${i}`,
         token: it.token,
         name: it.name,
         source: it.source,
-        img: it.img,
+        img: it.img
       });
     });
-
     return map;
   }
 
-  static async startAll() {
+  // التشغيل الكامل
+  static async start() {
+    Logger.info("Fetching items...");
     allItems = await this.fetchItems();
-    activeStreams.clear();
 
+    // 1️⃣ إنشاء بثوث Facebook
     for (const item of allItems.values()) {
       const live = await FacebookAPI.createLive(item.token, item.name);
       item.streamId = live.id;
       item.rtmps = live.rtmps;
-      StreamManager.start(item);
     }
 
-    // ⏳ انتظر حتى تعمل كل FFmpeg
-    while (!StreamManager.allRunning()) {
-      await new Promise(r => setTimeout(r, 2000));
+    // 2️⃣ تشغيل FFmpeg
+    for (const item of allItems.values()) {
+      StreamManager.startFFmpeg(item);
     }
 
-    // 🔥 الآن فقط استخرج DASH
-    for (const s of activeStreams.values()) {
-      s.dashUrl = await FacebookAPI.getDash(s.streamId, s.token);
+    // 3️⃣ انتظار حتى يشتغل الجميع
+    await new Promise(r => setTimeout(r, 8000));
+
+    // 4️⃣ جلب DASH + إرسال تقرير
+    let report = `📊 STREAM REPORT\n\n`;
+    for (const item of allItems.values()) {
+      item.dash = await FacebookAPI.getDash(item.streamId, item.token);
+      report += `📺 ${item.name}\n${item.dash}\n\n`;
     }
 
-    await Telegram.sendFullReport();
+    await Telegram.send(report);
+    Logger.success("All streams running");
   }
 
   static async restart() {
-    isRestarting = true;
-    STATS.restarts++;
-    Telegram.sendEvent("System Restart", "Restarting all streams...");
-    activeStreams.forEach(s => s.process.kill("SIGTERM"));
-    await new Promise(r => setTimeout(r, CONFIG.restartDelay));
-    await this.startAll();
-    isRestarting = false;
+    Logger.warn("Restarting system...");
+    StreamManager.stopAll();
+    await this.start();
   }
 }
 
+// ================== REPORT LOOP ==================
+setInterval(async () => {
+  const uptime = Math.floor((Date.now() - startTime) / 60000);
+  await Telegram.send(`📡 Status OK\nUptime: ${uptime} minutes\nStreams: ${allItems.size}`);
+}, CONFIG.reportInterval);
+
 // ================== START ==================
-(async () => {
-  writeFileSync("app.log", "=== START ===\n");
-  await Main.startAll();
-
-  setInterval(async () => {
-    const newItems = await Main.fetchItems();
-    if (newItems.size !== allItems.size) {
-      Telegram.sendEvent("Stream List Changed", "Restarting...");
-      Main.restart();
-    }
-  }, CONFIG.pollInterval);
-
-  setInterval(() => Telegram.sendFullReport(), CONFIG.telegram.reportInterval);
-})();
+Main.start().catch(e => {
+  Logger.error(e.message);
+  ExceptionHandler.trigger("Fatal Error");
+});
