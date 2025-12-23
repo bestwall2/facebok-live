@@ -220,11 +220,11 @@ class StreamManager {
       // Increment retry counter
       const currentRetries = streamRetries.get(item.id) || 0;
       streamRetries.set(item.id, currentRetries + 1);
-      
+      console.log(item.source);
       // FFmpeg command with User-Agent
       const ff = spawn("ffmpeg", [
         "-re",
-        "-user_agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+       
         "-i", item.source,
         "-c", "copy",
         "-f", "flv",
