@@ -77,7 +77,7 @@ class Telegram {
   static async sendStatus() {
     const uptime = Math.floor((Date.now() - startTime) / 60000);
     const activeCount = Array.from(allItems.values()).filter(item => 
-      activeStreams.has(item.id) && !activeStreams.get(item.id).killed
+      activeStreams.has(item.id) && activeStreams.get(item.id).process && !activeStreams.get(item.id).process.killed
     ).length;
     
     const status = `📡 **حالة النظام**\n\n` +
@@ -173,7 +173,7 @@ class StreamManager {
     activeStreams.clear();
   }
 
-  static async checkAllRunning() {
+  static checkAllRunning() {
     return Array.from(allItems.values()).every(item => 
       activeStreams.has(item.id) && 
       activeStreams.get(item.id).status === "running"
@@ -352,7 +352,7 @@ class Main {
       const maxAttempts = 30; // 30 * 2 ثانية = 60 ثانية كحد أقصى
       
       while (attempts < maxAttempts) {
-        const allRunning = await StreamManager.checkAllRunning();
+        const allRunning = StreamManager.checkAllRunning();
         if (allRunning) break;
         
         await new Promise(r => setTimeout(r, 2000));
@@ -383,4 +383,70 @@ class Main {
       Logger.success(`جميع البثوث شغالة: ${successCount}/${allItems.size}`);
 
       // تحديث بصمة العناصر
-      Polling
+      PollingSystem.lastItemsHash = PollingSystem.createItemsHash(allItems);
+      
+    } catch (error) {
+      Logger.error(`خطأ في التشغيل: ${error.message}`);
+      throw error;
+    }
+  }
+
+  static async restart() {
+    Logger.warn("إعادة تشغيل النظام...");
+    StreamManager.stopAll();
+    await this.start();
+  }
+}
+
+// ================== INTERVALS ==================
+
+// 📊 تقرير الحالة كل 5 دقائق
+setInterval(async () => {
+  if (!isRestarting) {
+    await Telegram.sendStatus();
+  }
+}, CONFIG.reportInterval);
+
+// 🔍 فحص التغيرات كل دقيقة
+setInterval(async () => {
+  await PollingSystem.pollForChanges();
+}, CONFIG.pollInterval);
+
+// ================== START ==================
+Main.start().catch(async (e) => {
+  Logger.error(`خطأ بدئي: ${e.message}`);
+  await Telegram.send(`🚨 **خطأ بدئي**\n${e.message}\n⏳ إعادة التشغيل خلال دقيقتين`);
+  
+  setTimeout(async () => {
+    try {
+      await Main.restart();
+    } catch (error) {
+      Logger.error(`فشل إعادة التشغيل: ${error.message}`);
+    }
+  }, CONFIG.restartDelay);
+});
+
+// ================== EVENT HANDLERS ==================
+process.on('SIGINT', () => {
+  Logger.info("تلقي SIGINT، إيقاف جميع البثوث...");
+  StreamManager.stopAll();
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  Logger.info("تلقي SIGTERM، إيقاف جميع البثوث...");
+  StreamManager.stopAll();
+  process.exit(0);
+});
+
+process.on('uncaughtException', async (error) => {
+  Logger.error(`خطأ غير معالج: ${error.message}`);
+  await Telegram.send(`🚨 **خطأ غير معالج**\n${error.message}\n⏳ إعادة التشغيل خلال دقيقتين`);
+  ExceptionHandler.trigger("خطأ غير معالج");
+});
+
+process.on('unhandledRejection', async (reason, promise) => {
+  Logger.error(`رفض غير معالج: ${reason}`);
+  await Telegram.send(`🚨 **رفض غير معالج**\n${reason}\n⏳ إعادة التشغيل خلال دقيقتين`);
+  ExceptionHandler.trigger("رفض غير معالج");
+});
