@@ -1,622 +1,240 @@
 // ================== IMPORTS ==================
-import { spawn } from 'child_process';
-import { writeFileSync, appendFileSync } from 'fs';
+import { spawn } from "child_process";
+import { writeFileSync, appendFileSync } from "fs";
 
-// ================== CONFIGURATION ==================
+// ================== CONFIG ==================
 const CONFIG = {
-    // API endpoint that returns your JSON list
-    apiUrl: "https://ani-box-nine.vercel.app/api/grok-chat",
-    pollInterval: 60000,  // Check every minute
-    restartDelay: 2000,   // Delay before restarting after exception
-    maxRetries: 3         // Max retries for API calls
+  apiUrl: "https://ani-box-nine.vercel.app/api/grok-chat",
+  pollInterval: 60000,
+  restartDelay: 3000,
+
+  telegram: {
+    botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",
+    chatId: "5806630118",
+    reportInterval: 5 * 60 * 1000,
+  },
 };
 
 // ================== GLOBAL STATE ==================
-let activeStreams = new Map();      // streamId -> {process, info, dashUrl}
-let allItems = new Map();           // itemId -> {token, name, source, img, pageId, rtmpsUrl, dashUrl}
-let isRestarting = false;           // Prevent multiple simultaneous restarts
-let lastRestartTime = 0;
-let monitoringInterval = null;
+let allItems = new Map();
+let activeStreams = new Map();
+let isRestarting = false;
+
+const STATS = {
+  startTime: Date.now(),
+  restarts: 0,
+  errors: 0,
+};
 
 // ================== LOGGER ==================
 class Logger {
-    static log(level, message, itemId = null) {
-        const timestamp = new Date().toISOString();
-        const logEntry = `[${timestamp}] [${level}] ${itemId ? `[${itemId}] ` : ''}${message}`;
-        
-        console.log(logEntry);
-        appendFileSync('facebook-streams.log', logEntry + '\n');
-    }
-    
-    static error(message, itemId = null) {
-        this.log('ERROR', message, itemId);
-    }
-    
-    static info(message, itemId = null) {
-        this.log('INFO', message, itemId);
-    }
-    
-    static warn(message, itemId = null) {
-        this.log('WARN', message, itemId);
-    }
-    
-    static success(message, itemId = null) {
-        this.log('SUCCESS', message, itemId);
-    }
+  static log(level, msg, id = "") {
+    const line = `[${new Date().toISOString()}] [${level}] ${id} ${msg}`;
+    console.log(line);
+    appendFileSync("app.log", line + "\n");
+    if (level === "ERROR") STATS.errors++;
+  }
+  static info(m, i) { this.log("INFO", m, i); }
+  static warn(m, i) { this.log("WARN", m, i); }
+  static error(m, i) { this.log("ERROR", m, i); }
+  static success(m, i) { this.log("SUCCESS", m, i); }
 }
 
-// ================== FACEBOOK API MANAGER ==================
+// ================== TELEGRAM ==================
+class Telegram {
+  static async send(text) {
+    try {
+      await fetch(
+        `https://api.telegram.org/bot${CONFIG.telegram.botToken}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: CONFIG.telegram.chatId,
+            text,
+            parse_mode: "HTML",
+          }),
+        }
+      );
+    } catch {}
+  }
+
+  static async sendEvent(title, body) {
+    await this.send(
+`🚨 <b>${title}</b>
+
+${body}
+
+⏱ ${new Date().toLocaleString()}`
+    );
+  }
+
+  static async sendFullReport() {
+    const uptime = Math.floor((Date.now() - STATS.startTime) / 60000);
+    const running = [...activeStreams.values()].filter(s => s.running);
+
+    let msg = `
+📊 <b>STREAM STATUS REPORT</b>
+
+⏱ Uptime: ${uptime} min
+📡 Streams: ${running.length}/${allItems.size}
+🔁 Restarts: ${STATS.restarts}
+❌ Errors: ${STATS.errors}
+
+📺 <b>Live Streams:</b>
+`;
+
+    running.forEach(s => {
+      msg += `• ${s.name}\n`;
+    });
+
+    msg += `\n📦 DASH URLs:\n`;
+    running.forEach(s => {
+      if (s.dashUrl) msg += `• ${s.name}\n${s.dashUrl}\n\n`;
+    });
+
+    await this.send(msg);
+  }
+}
+
+// ================== FACEBOOK API ==================
 class FacebookAPI {
-    static async createLiveStream(accessToken,  streamName) {
-        for (let attempt = 1; attempt <= CONFIG.maxRetries; attempt++) {
-            try {
-                const response = await fetch(
-                    `https://graph.facebook.com/v24.0/me/live_videos`,
-                    {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            title: streamName,
-                            status: 'UNPUBLISHED',
-                            access_token: accessToken
-                        })
-                    }
-                );
-                
-                const data = await response.json();
-                
-                if (data.error) {
-                    if (attempt < CONFIG.maxRetries) {
-                        Logger.warn(`Retry ${attempt}/${CONFIG.maxRetries} for ${streamName}`);
-                        await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-                        continue;
-                    }
-                    throw new Error(`Facebook API: ${data.error.message}`);
-                }
-                
-                return {
-                    streamId: data.id,
-                    rtmpsUrl: data.secure_stream_url || data.stream_url
-                };
-                
-            } catch (error) {
-                if (attempt === CONFIG.maxRetries) {
-                    throw error;
-                }
-            }
-        }
-    }
-    
-    static async getDashUrl(streamId, accessToken) {
-        try {
-            const response = await fetch(
-                `https://graph.facebook.com/v24.0/${streamId}?fields=dash_preview_url&access_token=${accessToken}`
-            );
-            
-            const data = await response.json();
-            return data.dash_preview_url;
-            
-        } catch (error) {
-            Logger.error(`Failed to get DASH URL for ${streamId}: ${error.message}`);
-            return null;
-        }
-    }
+  static async createLive(token, name) {
+    const r = await fetch("https://graph.facebook.com/v24.0/me/live_videos", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        title: name,
+        status: "UNPUBLISHED",
+        access_token: token,
+      }),
+    });
+    const j = await r.json();
+    if (j.error) throw new Error(j.error.message);
+    return { id: j.id, rtmps: j.secure_stream_url };
+  }
+
+  static async getDash(id, token) {
+    const r = await fetch(
+      `https://graph.facebook.com/v24.0/${id}?fields=dash_preview_url&access_token=${token}`
+    );
+    const j = await r.json();
+    return j.dash_preview_url || null;
+  }
 }
 
-// ================== STREAM PROCESS MANAGER ==================
+// ================== STREAM MANAGER ==================
 class StreamManager {
-    static startStream(itemInfo, rtmpsUrl) {
-        const { id, name, source } = itemInfo;
-        
-        Logger.info(`Starting FFmpeg for: ${name}`, id);
-        
-        // SIMPLE FFMPEG COMMAND - Works reliably
-        const ffmpeg = spawn("ffmpeg", [
-            "-re",
-            "-i", source,
-            "-c", "copy",
-            "-f", "flv",
-            rtmpsUrl
-        ]);
-        
-        const streamData = {
-            process: ffmpeg,
-            info: itemInfo,
-            startTime: Date.now(),
-            isRunning: true,
-            restartCount: 0
-        };
-        
-        // Store in active streams
-        activeStreams.set(id, streamData);
-        
-        // FFmpeg output handling
-        ffmpeg.stderr.on('data', (data) => {
-            const msg = data.toString();
-            
-            if (msg.includes('Opening') && msg.includes('output')) {
-                Logger.success(`Connected to Facebook`, id);
-            }
-            
-            if (msg.includes('error') || msg.includes('fail') || msg.includes('Invalid')) {
-                const errorMsg = msg.substring(0, 100);
-                Logger.error(`FFmpeg: ${errorMsg}`, id);
-                
-                // Trigger restart on error (Exception 2)
-                if (!isRestarting) {
-                    setTimeout(() => {
-                        Logger.warn(`FFmpeg error detected, triggering restart...`, id);
-                        ExceptionHandler.handleException('ffmpeg_error');
-                    }, 5000);
-                }
-            }
-        });
-        
-        ffmpeg.on('close', (code) => {
-            streamData.isRunning = false;
-            Logger.warn(`FFmpeg exited with code ${code}`, id);
-            
-            // If not during restart and not a clean exit, trigger restart
-            if (!isRestarting && code !== 0) {
-                setTimeout(() => {
-                    Logger.warn(`FFmpeg crash detected, triggering restart...`, id);
-                    ExceptionHandler.handleException('ffmpeg_crash');
-                }, 5000);
-            }
-        });
-        
-        ffmpeg.on('error', (error) => {
-            Logger.error(`Process error: ${error.message}`, id);
-            activeStreams.delete(id);
-        });
-        
-        return ffmpeg;
+  static start(item) {
+    Logger.info("Starting FFmpeg", item.id);
+
+    const ff = spawn("ffmpeg", [
+      "-re",
+      "-i", item.source,
+      "-c", "copy",
+      "-f", "flv",
+      item.rtmps,
+    ]);
+
+    activeStreams.set(item.id, {
+      ...item,
+      process: ff,
+      running: true,
+      dashUrl: null,
+    });
+
+    ff.stderr.on("data", d => {
+      if (d.toString().includes("error")) {
+        Logger.error("FFmpeg error", item.id);
+        this.handleCrash(item.id);
+      }
+    });
+
+    ff.on("close", () => {
+      Logger.warn("FFmpeg stopped", item.id);
+      this.handleCrash(item.id);
+    });
+  }
+
+  static handleCrash(id) {
+    if (!isRestarting) {
+      Telegram.sendEvent("Stream Crashed", `Stream ID: ${id}`);
+      Main.restart();
     }
-    
-    static stopAllStreams() {
-        Logger.info(`Stopping ${activeStreams.size} active streams...`);
-        
-        let stoppedCount = 0;
-        activeStreams.forEach((stream, id) => {
-            try {
-                if (stream.process && stream.process.exitCode === null) {
-                    stream.process.kill('SIGTERM');
-                    stoppedCount++;
-                }
-            } catch (error) {
-                Logger.error(`Error stopping stream ${id}: ${error.message}`);
-            }
-        });
-        
-        activeStreams.clear();
-        Logger.info(`Stopped ${stoppedCount} streams`);
-        return stoppedCount;
-    }
-    
-    static getActiveStreams() {
-        const active = [];
-        activeStreams.forEach((stream, id) => {
-            if (stream.isRunning) {
-                active.push({
-                    id,
-                    name: stream.info.name,
-                    running: true
-                });
-            }
-        });
-        return active;
-    }
+  }
+
+  static allRunning() {
+    return [...activeStreams.values()].every(s => s.running);
+  }
 }
 
-// ================== EXCEPTION HANDLER ==================
-class ExceptionHandler {
-    static async handleException(type) {
-        // Prevent multiple simultaneous restarts
-        if (isRestarting) {
-            Logger.warn(`Already restarting, skipping ${type} exception`);
-            return;
-        }
-        
-        const now = Date.now();
-        if (now - lastRestartTime < 30000) { // 30 second cooldown
-            Logger.warn(`Restart cooldown active, skipping ${type} exception`);
-            return;
-        }
-        
-        isRestarting = true;
-        lastRestartTime = now;
-        
-        Logger.warn(`=== HANDLING EXCEPTION: ${type.toUpperCase()} ===`);
-        
-        try {
-            // Stop all current streams
-            StreamManager.stopAllStreams();
-            
-            // Wait a bit
-            await new Promise(resolve => setTimeout(resolve, CONFIG.restartDelay));
-            
-            // Restart everything
-            await MainManager.restartAllStreams();
-            
-            Logger.success(`Exception ${type} handled successfully`);
-            
-        } catch (error) {
-            Logger.error(`Failed to handle exception ${type}: ${error.message}`);
-        } finally {
-            isRestarting = false;
-        }
+// ================== MAIN ==================
+class Main {
+  static async fetchItems() {
+    const r = await fetch(CONFIG.apiUrl);
+    const j = await r.json();
+    const map = new Map();
+
+    j.data.forEach((it, i) => {
+      map.set(it.name + i, {
+        id: it.name + i,
+        token: it.token,
+        name: it.name,
+        source: it.source,
+        img: it.img,
+      });
+    });
+
+    return map;
+  }
+
+  static async startAll() {
+    allItems = await this.fetchItems();
+    activeStreams.clear();
+
+    for (const item of allItems.values()) {
+      const live = await FacebookAPI.createLive(item.token, item.name);
+      item.streamId = live.id;
+      item.rtmps = live.rtmps;
+      StreamManager.start(item);
     }
+
+    // ⏳ انتظر حتى تعمل كل FFmpeg
+    while (!StreamManager.allRunning()) {
+      await new Promise(r => setTimeout(r, 2000));
+    }
+
+    // 🔥 الآن فقط استخرج DASH
+    for (const s of activeStreams.values()) {
+      s.dashUrl = await FacebookAPI.getDash(s.streamId, s.token);
+    }
+
+    await Telegram.sendFullReport();
+  }
+
+  static async restart() {
+    isRestarting = true;
+    STATS.restarts++;
+    Telegram.sendEvent("System Restart", "Restarting all streams...");
+    activeStreams.forEach(s => s.process.kill("SIGTERM"));
+    await new Promise(r => setTimeout(r, CONFIG.restartDelay));
+    await this.startAll();
+    isRestarting = false;
+  }
 }
 
-// ================== MAIN STREAM MANAGER ==================
-class MainManager {
-static async fetchItemsList() {
-        try {
-            const response = await fetch(CONFIG.apiUrl, {
-                method: "GET",
-                headers: { "Content-Type": "application/json" },
-               
-            });
-            
-                       
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            }
-            
-            const data = await response.json();
-            console.log("🔍 RAW API RESPONSE:", JSON.stringify(data, null, 2));
-            // Validate the exact structure from your example
-            if (!data.success) {
-                throw new Error('API returned success: false');
-            }
-            
-            if (!Array.isArray(data.data)) {
-                throw new Error('API data is not an array');
-            }
-            
-            const items = new Map();
-            
-            // Process each item exactly as in your JSON
-            data.data.forEach((item) => {
-                // Validate required fields
-                if (!item.token || !item.name || !item.source) {
-                    console.warn(`Skipping item ${item.id || 'unknown'}: missing required fields`);
-                    return;
-                }
-                
-                const itemId = item.id || `item_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-                
-                items.set(itemId, {
-                    id: itemId,
-                    token: item.token,           // Access token for this item
-                    name: item.name,            // Stream name
-                    source: item.source,        // Source URL (M3U8/MP4/etc)
-                    img: item.img || 'default.jpg', // Image for this stream
-                    pageId: null,               // Will be fetched later
-                    rtmpsUrl: null,             // Will be created later
-                    dashUrl: null               // Will be fetched later
-                });
-                
-                console.log(`✅ Loaded: ${item.name} (${itemId})`);
-            });
-            
-            console.log(`📊 Total items loaded: ${items.size}`);
-            return items;
-            
-        } catch (error) {
-            Logger.error(`Failed to fetch items list: ${error.message}`);
-            return new Map();
-        }
-    }
-    
-    static async processAllItems() {
-        Logger.info(`Processing ${allItems.size} items...`);
-        
-        const processedItems = new Map();
-        
-        // Process each item sequentially
-        for (const [itemId, item] of allItems) {
-            try {
-                Logger.info(`Processing: ${item.name}`, itemId);
-                
-                
-                // 2. Create Facebook Live stream
-                if (!item.rtmpsUrl) {
-                    const liveStream = await FacebookAPI.createLiveStream(
-                        item.token,                      
-                        item.name
-                    );
-                    
-                    item.rtmpsUrl = liveStream.rtmpsUrl;
-                    item.streamId = liveStream.streamId;
-                  
-                    Logger.success(`Created live stream: ${item.streamId}`, itemId);
-                    
-                    // 3. Get DASH URL
-                    await new Promise(resolve => setTimeout(resolve, 3000)); // Wait for stream to initialize
-                    item.dashUrl = await FacebookAPI.getDashUrl(item.streamId, item.token);
-                    
-                    if (item.dashUrl) {
-                        Logger.success(`Got DASH URL`, itemId);
-                    }
-                }
-                
-                // Store processed item
-                processedItems.set(itemId, item);
-                
-            } catch (error) {
-                Logger.error(`Failed to process ${item.name}: ${error.message}`, itemId);
-            }
-        }
-        
-        return processedItems;
-    }
-    
-    static async startAllStreams(processedItems) {
-        Logger.info(`Starting ${processedItems.size} streams...`);
-        
-        // Start all streams at once
-        processedItems.forEach((item, itemId) => {
-            if (item.rtmpsUrl && item.source) {
-                StreamManager.startStream(item, item.rtmpsUrl);
-            }
-        });
-        
-        // Wait a moment for streams to initialize
-        await new Promise(resolve => setTimeout(resolve, 5000));
-        
-        // Check which streams are actually running
-        const runningStreams = StreamManager.getActiveStreams();
-        Logger.success(`${runningStreams.length}/${processedItems.size} streams started successfully`);
-        
-        return runningStreams.length === processedItems.size;
-    }
-    
-    static async restartAllStreams() {
-        Logger.info('=== RESTARTING ALL STREAMS ===');
-        
-        // Stop everything first
-        StreamManager.stopAllStreams();
-        
-        // Fetch fresh items list
-        const newItems = await this.fetchItemsList();
-        
-        // Check for changes (Exception 1 & 3)
-        const changes = this.detectChanges(allItems, newItems);
-        
-        if (changes.added > 0 || changes.removed > 0 || changes.changed > 0) {
-            Logger.warn(`Changes detected: +${changes.added} -${changes.removed} ~${changes.changed}`);
-            allItems = newItems;
-        }
-        
-        // Process all items
-        const processedItems = await this.processAllItems();
-        
-        // Start all streams
-        const success = await this.startAllStreams(processedItems);
-        
-        if (success) {
-            // Generate and output JSON
-            this.outputStreamJson(processedItems);
-        }
-        
-        return success;
-    }
-    
-    static detectChanges(oldItems, newItems) {
-        const changes = { added: 0, removed: 0, changed: 0 };
-        
-        // Check removed items
-        oldItems.forEach((item, id) => {
-            if (!newItems.has(id)) {
-                changes.removed++;
-            }
-        });
-        
-        // Check added/changed items
-        newItems.forEach((newItem, id) => {
-            const oldItem = oldItems.get(id);
-            if (!oldItem) {
-                changes.added++;
-            } else if (
-                oldItem.token !== newItem.token ||
-                oldItem.name !== newItem.name ||
-                oldItem.source !== newItem.source ||
-                oldItem.img !== newItem.img
-            ) {
-                changes.changed++;
-            }
-        });
-        
-        return changes;
-    }
-    
-    static outputStreamJson(processedItems) {
-        const output = [];
-        
-        processedItems.forEach((item, itemId) => {
-            if (item.dashUrl && activeStreams.get(itemId)?.isRunning) {
-                output.push({
-                    name: item.name,
-                    img: item.img,
-                    mpd: item.dashUrl,
-                    accesstoken: item.token,
-                    status: 'live',
-                    timestamp: new Date().toISOString()
-                });
-            }
-        });
-        
-        if (output.length > 0) {
-            console.log('\n' + '='.repeat(80));
-            console.log('STREAM JSON OUTPUT (Ready for Facebook Post):');
-            console.log('='.repeat(80));
-            console.log(JSON.stringify(output, null, 2));
-            console.log('='.repeat(80) + '\n');
-            
-            // Also save to file
-            writeFileSync(CONFIG.logging?.statusFile || 'stream-status.json', 
-                         JSON.stringify(output, null, 2));
-            
-            Logger.success(`Generated JSON for ${output.length} live streams`);
-        } else {
-            Logger.warn('No live streams to output in JSON');
-        }
-    }
-}
+// ================== START ==================
+(async () => {
+  writeFileSync("app.log", "=== START ===\n");
+  await Main.startAll();
 
-// ================== MONITORING SYSTEM ==================
-class Monitor {
-    static start() {
-        Logger.info('Starting monitoring system...');
-        
-        // Initial restart
-        MainManager.restartAllStreams().catch(console.error);
-        
-        // Start periodic monitoring
-        monitoringInterval = setInterval(async () => {
-            try {
-                await this.checkAndUpdate();
-            } catch (error) {
-                Logger.error(`Monitor error: ${error.message}`);
-            }
-        }, CONFIG.pollInterval);
-        
-        Logger.success('Monitoring system started');
+  setInterval(async () => {
+    const newItems = await Main.fetchItems();
+    if (newItems.size !== allItems.size) {
+      Telegram.sendEvent("Stream List Changed", "Restarting...");
+      Main.restart();
     }
-    
-    static async checkAndUpdate() {
-        if (isRestarting) {
-            return; // Skip if already restarting
-        }
-        
-        Logger.info('Performing periodic check...');
-        
-        try {
-            // Fetch fresh items list
-            const newItems = await MainManager.fetchItemsList();
-            
-            // Check for changes
-            const changes = MainManager.detectChanges(allItems, newItems);
-            
-            if (changes.added > 0 || changes.removed > 0) {
-                Logger.warn(`API changes detected, triggering restart...`);
-                ExceptionHandler.handleException('api_change');
-            } else {
-                // Check stream health
-                const activeCount = StreamManager.getActiveStreams().length;
-                const expectedCount = allItems.size;
-                
-                if (activeCount < expectedCount) {
-                    Logger.warn(`Stream count mismatch: ${activeCount}/${expectedCount}, triggering restart...`);
-                    ExceptionHandler.handleException('stream_mismatch');
-                } else if (activeCount === expectedCount && activeCount > 0) {
-                    // All streams healthy, output JSON
-                    MainManager.outputStreamJson(allItems);
-                }
-            }
-            
-        } catch (error) {
-            Logger.error(`Check error: ${error.message}`);
-        }
-    }
-    
-    static stop() {
-        if (monitoringInterval) {
-            clearInterval(monitoringInterval);
-            monitoringInterval = null;
-        }
-        StreamManager.stopAllStreams();
-        Logger.info('Monitoring system stopped');
-    }
-}
+  }, CONFIG.pollInterval);
 
-// ================== MAIN APPLICATION ==================
-class Application {
-    static async start() {
-        console.log('\n' + '='.repeat(80));
-        console.log('🚀 FACEBOOK MULTI-STREAM MANAGER');
-        console.log('Automatic error recovery & JSON output');
-        console.log('='.repeat(80) + '\n');
-        
-        // Create log file
-        try {
-            writeFileSync('facebook-streams.log', 
-                         `=== Facebook Stream Manager Started ===\n` +
-                         `Time: ${new Date().toISOString()}\n` +
-                         `API: ${CONFIG.apiUrl}\n` +
-                         '='.repeat(50) + '\n');
-        } catch (e) {
-            console.error('Log init failed:', e.message);
-        }
-        
-        // Handle uncaught errors
-        process.on('uncaughtException', (error) => {
-            Logger.error(`Uncaught exception: ${error.message}`);
-            Logger.error(`Stack: ${error.stack}`);
-            
-            // Try to restart
-            setTimeout(() => {
-                ExceptionHandler.handleException('uncaught_exception');
-            }, 5000);
-        });
-        
-        process.on('unhandledRejection', (reason, promise) => {
-            Logger.error(`Unhandled rejection at: ${promise}, reason: ${reason}`);
-        });
-        
-        // Graceful shutdown
-        process.on('SIGINT', () => {
-            console.log('\n' + '🛑'.repeat(30));
-            console.log('GRACEFUL SHUTDOWN');
-            console.log('🛑'.repeat(30));
-            
-            Monitor.stop();
-            
-            console.log(`\n✅ Stopped all streams`);
-            console.log('📝 Logs: facebook-streams.log');
-            console.log('📊 Status: stream-status.json');
-            console.log('\n👋 Goodbye!\n');
-            
-            process.exit(0);
-        });
-        
-        // Start the system
-        Monitor.start();
-        
-        // Keep alive
-        while (true) {
-            await new Promise(resolve => setTimeout(resolve, 60000));
-        }
-    }
-}
-
-// ================== START APPLICATION ==================
-// Create package.json if needed
-try {
-    const fs = await import('fs');
-    if (!fs.existsSync('package.json')) {
-        fs.writeFileSync('package.json', JSON.stringify({
-            "type": "module",
-            "name": "facebook-stream-manager",
-            "version": "1.0.0"
-        }, null, 2));
-        console.log('✅ Created package.json');
-    }
-} catch (e) {
-    // Continue anyway
-}
-
-// Check for fetch
-if (typeof fetch === 'undefined') {
-    console.log('⚠️ Installing node-fetch...');
-    console.log('Run: npm install node-fetch@3');
-    process.exit(1);
-}
-
-// Start
-Application.start().catch(error => {
-    console.error('\n💥 FATAL ERROR:', error);
-    console.error('Stack:', error.stack);
-    process.exit(1);
-});
+  setInterval(() => Telegram.sendFullReport(), CONFIG.telegram.reportInterval);
+})();
