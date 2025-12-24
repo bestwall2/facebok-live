@@ -51,13 +51,38 @@ let startupTimer = null; // for initial startup delay
 /* ================= CACHE ================= */
 
 function loadCache() {
-  if (!fs.existsSync(CACHE_FILE)) return;
+  if (!fs.existsSync(CACHE_FILE)) {
+    log(`📝 No cache file found, starting fresh`);
+    return;
+  }
   try {
-    const json = JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"));
-    Object.entries(json).forEach(([k, v]) => streamCache.set(k, v));
-    log(`✅ Loaded ${streamCache.size} cached streams`);
+    const data = fs.readFileSync(CACHE_FILE, "utf8");
+    if (!data || data.trim() === "") {
+      log(`📝 Cache file is empty, starting fresh`);
+      return;
+    }
+
+    const json = JSON.parse(data);
+    const entries = Object.entries(json);
+
+    if (entries.length === 0) {
+      log(`📝 Cache file has no entries, starting fresh`);
+      return;
+    }
+
+    entries.forEach(([k, v]) => streamCache.set(k, v));
+    log(`✅ Loaded ${streamCache.size} cached streams from file`);
   } catch (error) {
     log(`❌ Error loading cache: ${error.message}`);
+    // If cache is corrupted, rename it and start fresh
+    try {
+      const backupName = `${CACHE_FILE}.corrupted.${Date.now()}`;
+      fs.renameSync(CACHE_FILE, backupName);
+      log(`⚠️ Corrupted cache backed up to: ${backupName}`);
+    } catch (e) {
+      log(`⚠️ Could not backup corrupted cache: ${e.message}`);
+    }
+    streamCache.clear(); // Start with empty cache
   }
 }
 
@@ -66,6 +91,7 @@ function saveCache() {
     const o = {};
     streamCache.forEach((v, k) => (o[k] = v));
     fs.writeFileSync(CACHE_FILE, JSON.stringify(o, null, 2));
+    log(`💾 Cache saved with ${streamCache.size} streams`);
   } catch (error) {
     log(`❌ Error saving cache: ${error.message}`);
   }
@@ -127,30 +153,57 @@ async function createLive(token, name) {
 async function getStreamAndDash(liveId, token) {
   log(`🌐 Getting stream URL for Live ID: ${liveId}`);
   const fields = "stream_url,dash_preview_url,status";
-  for (let i = 0; i < 6; i++) {
-    const r = await fetch(
-      `https://api.facebook.com/v24.0/${liveId}?fields=${fields}&access_token=${token}`
-    );
-    const j = await r.json();
-    if (j.stream_url) {
-      log(`✅ Stream URL ready for ${liveId}`);
-      return {
-        stream_url: j.stream_url,
-        dash: j.dash_preview_url || "N/A",
-        status: j.status || "UNKNOWN",
-      };
+
+  // Try for up to 30 seconds (15 attempts × 2 seconds)
+  for (let i = 0; i < 15; i++) {
+    try {
+      const r = await fetch(
+        `https://graph.facebook.com/v24.0/${liveId}?fields=${fields}&access_token=${token}`
+      );
+
+      if (!r.ok) {
+        log(`⚠️ Facebook API error ${r.status}, retrying...`);
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+
+      const j = await r.json();
+
+      if (j.error) {
+        log(`⚠️ Facebook API error: ${j.error.message}, retrying...`);
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+
+      if (j.stream_url) {
+        log(`✅ Stream URL ready for ${liveId}`);
+        return {
+          stream_url: j.stream_url,
+          dash: j.dash_preview_url || "N/A",
+          status: j.status || "UNKNOWN",
+        };
+      }
+
+      log(`⏳ Waiting for stream URL (attempt ${i + 1}/15)...`);
+    } catch (error) {
+      log(`⚠️ Network error getting stream URL: ${error.message}, retrying...`);
     }
-    log(`⏳ Waiting for stream URL (attempt ${i + 1}/6)...`);
+
     await new Promise((r) => setTimeout(r, 2000));
   }
-  throw new Error("Preview not ready");
+
+  throw new Error("Preview not ready after 30 seconds");
 }
 
 /* ================= STABLE STREAM ID GENERATION ================= */
 
 function generateStreamId(name, source) {
+  // Trim and normalize the name
+  const cleanName = name.trim();
+  const cleanSource = source.trim();
+
   // Create a stable hash from name and source
-  const str = `${name}|${source}`;
+  const str = `${cleanName}|${cleanSource}`;
   let hash = 0;
   for (let i = 0; i < str.length; i++) {
     const char = str.charCodeAt(i);
@@ -550,13 +603,18 @@ async function fetchApiList() {
     const map = new Map();
 
     j.data.forEach((s) => {
-      // Generate stable ID based on name and source
-      const streamId = generateStreamId(s.name, s.source);
+      // Clean and trim the data
+      const cleanName = s.name ? s.name.trim() : "Unnamed Stream";
+      const cleanSource = s.source ? s.source.trim() : "";
+      const cleanToken = s.token ? s.token.trim() : "";
+
+      // Generate stable ID based on cleaned name and source
+      const streamId = generateStreamId(cleanName, cleanSource);
       map.set(streamId, {
         id: streamId,
-        name: s.name,
-        token: s.token,
-        source: s.source,
+        name: cleanName,
+        token: cleanToken,
+        source: cleanSource,
       });
     });
 
@@ -773,7 +831,6 @@ async function boot() {
     apiItems = await fetchApiList();
 
     log(`📋 Loaded ${apiItems.size} items from API`);
-    log(`💾 Loaded ${streamCache.size} cached streams`);
 
     // Send startup notification
     const delaySeconds = CONFIG.initialDelay / 1000;
