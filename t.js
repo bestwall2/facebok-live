@@ -258,53 +258,45 @@ function startFFmpeg(item, force = false) {
     restartTimers.delete(item.id);
   }
 
-  const cmd = ffmpeg(item.source)
+   const cmd = ffmpeg(item.source)
     .inputOptions([
+      // User-Agent الاحتفاظ به
       "-headers",
       "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36\r\n",
-
-      "-re",
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-reconnect",
-      "1",
-      "-reconnect_at_eof",
-      "1",
-      "-reconnect_streamed",
-      "1",
-      "-reconnect_delay_max",
-      "5",
+      "-hide_banner", "-loglevel", "error",
+  
+      // Low-latency + reconnect + timeout
       "-fflags", "+genpts+igndts+nobuffer",
+      "-flags", "low_delay",
+      "-rw_timeout", "3000000",
+      "-timeout", "3000000",
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_at_eof", "1",
+      "-reconnect_delay_max", "5",
     ])
     .videoCodec("libx264")
     .audioCodec("aac")
-    .audioChannels(1)
+    .audioChannels(2)
     .audioFrequency(44100)
-    .audioBitrate("96k")
+    .audioBitrate("128k")
     .outputOptions([
-      "-preset",
-      "veryfast",
-      "-tune",
-      "zerolatency",
-      "-b:v",
-      "2500k",
-      "-maxrate",
-      "2500k",
-      "-bufsize",
-      "5000k",
-      "-g",
-      "60",
-      "-r",
-      "30",
-      "-pix_fmt",
-      "yuv420p",
-      "-f",
-      "flv",
-      "-flvflags",
-      "no_duration_filesize",
-      "-rtmp_live",
-      "live",
+      "-preset", "superfast",
+      "-tune", "zerolatency",
+      "-profile:v", "main",
+      "-level", "4.2",
+      "-pix_fmt", "yuv420p",
+      "-r", "30",
+      "-g", "60",
+      "-keyint_min", "60",
+      "-sc_threshold", "0",
+      "-b:v", "6000k",
+      "-maxrate", "6000k",
+      "-bufsize", "12000k",
+      "-af", "aresample=async=1:min_hard_comp=0.100:first_pts=0",
+      "-f", "flv",
+      "-rtmp_live", "live",
+      "-rtmp_buffer", "50",
     ])
     .output(cache.stream_url)
     .on("start", (commandLine) => {
