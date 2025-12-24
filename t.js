@@ -113,7 +113,7 @@ class StreamManager {
       item.preview = preview;
       const rawUrl = preview.stream_url;
       item.rtmps = rawUrl;
-
+      console.log("Preview raw:", rawUrl);
       const cmd = ffmpeg(item.source)
         .inputOptions(FACEBOOK_FFMPEG_OPTIONS.input)
         .outputOptions(FACEBOOK_FFMPEG_OPTIONS.output)
