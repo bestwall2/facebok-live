@@ -128,7 +128,7 @@ async function getStreamAndDash(liveId, token) {
   const fields = "stream_url,dash_preview_url,status";
   for (let i = 0; i < 6; i++) {
     const r = await fetch(
-      `https://api.facebook.com/v24.0/${liveId}?fields=${fields}&access_token=${token}`
+      `https://graph.facebook.com/v24.0/${liveId}?fields=${fields}&access_token=${token}`
     );
     const j = await r.json();
     if (j.stream_url) {
