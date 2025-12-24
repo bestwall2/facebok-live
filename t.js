@@ -260,12 +260,16 @@ function startFFmpeg(item, force = false) {
 
   const cmd = ffmpeg(item.source)
     .inputOptions([
-     "-headers",
-     "User-Agent: Mozilla/5.0 (Linux; Android 10; IPTV)\r\n" +
-     "Referer: http://xvip.pro/\r\n" +
-     "Origin: http://xvip.pro\r\n" +
-     "Accept: */*\r\n" +
-     "Connection: keep-alive\r\n",
+      "-headers",
+      "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8\r\n" +
+      "Accept-Encoding: gzip, deflate\r\n" +
+      "Accept-Language: en-US,en;q=0.6\r\n" +
+      "Cache-Control: max-age=0\r\n" +
+      "Connection: keep-alive\r\n" +
+      "Host: xcarscharge.pro:8080\r\n" +
+      "Upgrade-Insecure-Requests: 1\r\n" +
+      "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36\r\n",
+
       
         // 👇 إجبار FFmpeg على Live TS
       "-f", "mpegts",
