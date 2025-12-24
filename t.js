@@ -260,6 +260,11 @@ function startFFmpeg(item, force = false) {
 
   const cmd = ffmpeg(item.source)
     .inputOptions([
+        // 👇 إجبار FFmpeg على Live TS
+      "-f", "mpegts",
+      "-use_wallclock_as_timestamps", "1",
+    
+      "-flags", "low_delay",
       "-re",
       "-hide_banner",
       "-loglevel",
@@ -272,8 +277,7 @@ function startFFmpeg(item, force = false) {
       "1",
       "-reconnect_delay_max",
       "5",
-      "-fflags",
-      "+genpts+igndts",
+      "-fflags", "+genpts+igndts+nobuffer",
     ])
     .videoCodec("libx264")
     .audioCodec("aac")
