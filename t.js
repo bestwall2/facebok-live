@@ -263,12 +263,6 @@ function startFFmpeg(item, force = false) {
       "-headers",
       "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36\r\n",
 
-      
-        // 👇 إجبار FFmpeg على Live TS
-      "-f", "mpegts",
-      "-use_wallclock_as_timestamps", "1",
-    
-      "-flags", "low_delay",
       "-re",
       "-hide_banner",
       "-loglevel",
