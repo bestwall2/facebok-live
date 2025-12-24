@@ -11,6 +11,8 @@
 import fs from "fs";
 import ffmpeg from "fluent-ffmpeg";
 import fetch from "node-fetch";
+import os from "os";
+import process from "process";
 
 /* ================= CONFIG ================= */
 
@@ -39,14 +41,24 @@ let startupTimer = null; // for startup delay
 
 function loadCache() {
   if (!fs.existsSync(CACHE_FILE)) return;
-  const json = JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"));
-  Object.entries(json).forEach(([k, v]) => streamCache.set(k, v));
+  try {
+    const json = JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"));
+    Object.entries(json).forEach(([k, v]) => streamCache.set(k, v));
+    log(`✅ Loaded ${streamCache.size} cached streams`);
+  } catch (error) {
+    log(`❌ Error loading cache: ${error.message}`);
+  }
 }
 
 function saveCache() {
-  const o = {};
-  streamCache.forEach((v, k) => (o[k] = v));
-  fs.writeFileSync(CACHE_FILE, JSON.stringify(o, null, 2));
+  try {
+    const o = {};
+    streamCache.forEach((v, k) => (o[k] = v));
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(o, null, 2));
+    log(`💾 Cache saved (${streamCache.size} streams)`);
+  } catch (error) {
+    log(`❌ Error saving cache: ${error.message}`);
+  }
 }
 
 /* ================= LOGGER ================= */
@@ -57,7 +69,8 @@ const log = (m) => console.log(`[${new Date().toISOString()}] ${m}`);
 
 async function tg(msg, chatId = CONFIG.telegram.chatId) {
   try {
-    await fetch(
+    log(`📤 Sending Telegram: ${msg.substring(0, 50)}...`);
+    const response = await fetch(
       `https://api.telegram.org/bot${CONFIG.telegram.botToken}/sendMessage`,
       {
         method: "POST",
@@ -70,14 +83,22 @@ async function tg(msg, chatId = CONFIG.telegram.chatId) {
         }),
       }
     );
+
+    const result = await response.json();
+    if (!result.ok) {
+      log(`❌ Telegram error: ${result.description}`);
+    } else {
+      log(`✅ Telegram sent successfully`);
+    }
   } catch (error) {
-    console.error("Telegram send error:", error);
+    log(`❌ Telegram send error: ${error.message}`);
   }
 }
 
 /* ================= FACEBOOK ================= */
 
 async function createLive(token, name) {
+  log(`🌐 Creating Facebook Live for: ${name}`);
   const r = await fetch("https://graph.facebook.com/v24.0/me/live_videos", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -88,11 +109,16 @@ async function createLive(token, name) {
     }),
   });
   const j = await r.json();
-  if (j.error) throw new Error(j.error.message);
+  if (j.error) {
+    log(`❌ Facebook API error: ${j.error.message}`);
+    throw new Error(j.error.message);
+  }
+  log(`✅ Created Live ID: ${j.id}`);
   return j.id;
 }
 
 async function getStreamAndDash(liveId, token) {
+  log(`🌐 Getting stream URL for Live ID: ${liveId}`);
   const fields = "stream_url,dash_preview_url,status";
   for (let i = 0; i < 6; i++) {
     const r = await fetch(
@@ -100,12 +126,14 @@ async function getStreamAndDash(liveId, token) {
     );
     const j = await r.json();
     if (j.stream_url) {
+      log(`✅ Stream URL ready for ${liveId}`);
       return {
         stream_url: j.stream_url,
         dash: j.dash_preview_url || "N/A",
         status: j.status || "UNKNOWN",
       };
     }
+    log(`⏳ Waiting for stream URL (attempt ${i + 1}/6)...`);
     await new Promise((r) => setTimeout(r, 2000));
   }
   throw new Error("Preview not ready");
@@ -124,23 +152,29 @@ function startFFmpeg(item) {
   streamStartTimes.set(item.id, Date.now());
 
   const cmd = ffmpeg(item.source)
-    .inputOptions(["-re"])
+    .inputOptions(["-re", "-loglevel", "quiet"]) // ⭐ DISABLE FFMPEG LOGS
     .outputOptions(["-c", "copy", "-f", "flv"])
     .output(cache.stream_url)
-    .on("start", () => {
+    .on("start", (commandLine) => {
       log(`✅ FFmpeg started for ${item.name}`);
+      // Optional: log just the start command
+      // log(`FFmpeg command: ${commandLine.substring(0, 100)}...`);
     })
     .on("error", (err) => {
-      log(`FFmpeg error for ${item.name}: ${err.message}`);
+      log(`❌ FFmpeg error for ${item.name}: ${err.message}`);
       restartFFmpeg(item);
     })
     .on("end", () => {
-      log(`FFmpeg ended for ${item.name}`);
+      log(`🔚 FFmpeg ended for ${item.name}`);
       restartFFmpeg(item);
     })
-    .on("stderr", (stderrLine) => {
-      // Optional: Log ffmpeg output
-      console.log(`[FFMPEG ${item.name}] ${stderrLine}`);
+    // ⭐ REMOVED stderr event handler to disable logs
+    .on("progress", (progress) => {
+      // Optional: only log progress every 30 seconds
+      if (progress.frames % 900 === 0) {
+        // assuming 30fps * 30 seconds
+        log(`📊 ${item.name}: ${progress.frames} frames processed`);
+      }
     });
 
   activeStreams.set(item.id, cmd);
@@ -156,7 +190,7 @@ function stopFFmpeg(id) {
       log(`⏹️ Stopped ${id}`);
     }
   } catch (err) {
-    console.error(`Error stopping ${id}:`, err);
+    log(`❌ Error stopping ${id}: ${err.message}`);
   }
   activeStreams.delete(id);
 }
@@ -205,14 +239,14 @@ function formatUptime(startTime) {
 
 function getServerInfo() {
   const serverInfo = {
-    hostname: require("os").hostname(),
+    hostname: os.hostname(),
     platform: process.platform,
     arch: process.arch,
     nodeVersion: process.version,
     uptime: formatUptime(process.uptime() * 1000),
     memory: {
       used: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
-      total: `${Math.round(require("os").totalmem() / 1024 / 1024)}MB`,
+      total: `${Math.round(os.totalmem() / 1024 / 1024)}MB`,
     },
     streams: {
       active: activeStreams.size,
@@ -288,6 +322,7 @@ async function generateInfoReport() {
 
 async function fetchApiList() {
   try {
+    log(`🌐 Fetching API list from ${CONFIG.streamsApi}`);
     const r = await fetch(CONFIG.streamsApi);
     const j = await r.json();
     const map = new Map();
@@ -299,9 +334,10 @@ async function fetchApiList() {
         source: s.source,
       });
     });
+    log(`✅ Fetched ${map.size} items from API`);
     return map;
   } catch (error) {
-    log(`Error fetching API list: ${error.message}`);
+    log(`❌ Error fetching API list: ${error.message}`);
     return apiItems; // Return current list on error
   }
 }
@@ -323,7 +359,7 @@ async function watcher() {
           // Wait 1:50 minutes before starting (BOTH NEW AND CACHED)
           startFFmpegWithDelay(item);
         } catch (error) {
-          log(`Error creating live for ${item.name}: ${error.message}`);
+          log(`❌ Error creating live for ${item.name}: ${error.message}`);
         }
       }
     }
@@ -341,7 +377,7 @@ async function watcher() {
 
     apiItems = newList;
   } catch (error) {
-    log(`Watcher error: ${error.message}`);
+    log(`❌ Watcher error: ${error.message}`);
   }
 }
 
@@ -359,10 +395,13 @@ async function handleTelegramCommand(update) {
     const command = message.text.trim();
     const now = Date.now();
 
+    log(`🤖 Received command: ${command} from user ${userId}`);
+
     // Rate limiting: 1 command per 5 seconds per user
     if (lastCommandTime.has(userId)) {
       const lastTime = lastCommandTime.get(userId);
       if (now - lastTime < 5000) {
+        log(`⏳ Rate limiting user ${userId}`);
         await tg("⏳ Please wait 5 seconds between commands.", chatId);
         return;
       }
@@ -378,14 +417,16 @@ async function handleTelegramCommand(update) {
     }
 
     // Handle /info command
-    if (command === "/info" || command === "/info@your_bot_username") {
+    if (command === "/info" || command.startsWith("/info")) {
+      log(`📊 Generating info report for user ${userId}`);
       const report = await generateInfoReport();
       await tg(report, chatId);
       return;
     }
 
     // Handle /status command (short version)
-    if (command === "/status" || command === "/status@your_bot_username") {
+    if (command === "/status" || command.startsWith("/status")) {
+      log(`📈 Generating status report for user ${userId}`);
       const status =
         `📊 <b>Stream Manager Status</b>\n\n` +
         `🟢 Active Streams: ${activeStreams.size}\n` +
@@ -399,7 +440,8 @@ async function handleTelegramCommand(update) {
     }
 
     // Handle /help command
-    if (command === "/help" || command === "/help@your_bot_username") {
+    if (command === "/help" || command.startsWith("/help")) {
+      log(`❓ Showing help for user ${userId}`);
       const helpText =
         `🤖 <b>Stream Manager Bot Commands</b>\n\n` +
         `/info - Get detailed system and stream report\n` +
@@ -417,22 +459,39 @@ async function handleTelegramCommand(update) {
 // Poll Telegram for updates
 async function telegramBotPolling() {
   let offset = 0;
+  let errorCount = 0;
 
   while (systemState === "running") {
     try {
       const response = await fetch(
         `https://api.telegram.org/bot${CONFIG.telegram.botToken}/getUpdates?offset=${offset}&timeout=30`
       );
+
+      if (!response.ok) {
+        log(`❌ Telegram API error: ${response.status}`);
+        errorCount++;
+        if (errorCount > 5) {
+          log(`❌ Too many Telegram errors, pausing for 30 seconds`);
+          await new Promise((r) => setTimeout(r, 30000));
+          errorCount = 0;
+        }
+        await new Promise((r) => setTimeout(r, 5000));
+        continue;
+      }
+
       const data = await response.json();
+      errorCount = 0; // Reset error count on success
 
       if (data.ok && data.result.length > 0) {
+        log(`📩 Received ${data.result.length} Telegram updates`);
         for (const update of data.result) {
           offset = update.update_id + 1;
           await handleTelegramCommand(update);
         }
       }
     } catch (error) {
-      console.error("Telegram polling error:", error);
+      log(`❌ Telegram polling error: ${error.message}`);
+      errorCount++;
       await new Promise((r) => setTimeout(r, 5000));
     }
 
@@ -443,6 +502,7 @@ async function telegramBotPolling() {
 /* ================= FINAL CHECK ================= */
 
 async function finalCheckReport() {
+  log(`📡 Generating final DASH report`);
   if (activeStreams.size === 0) {
     await tg(
       "⚠️ <b>No active streams detected</b>\nSystem is running but no streams are active."
