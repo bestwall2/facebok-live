@@ -160,7 +160,7 @@ class StreamManager {
           Logger.error(`Retry failed ${item.name}: ${e.message}`)
         );
       }
-    }, 60000);
+    }, 120000);
   }
 
   static stopAll() {
