@@ -260,6 +260,13 @@ function startFFmpeg(item, force = false) {
 
   const cmd = ffmpeg(item.source)
     .inputOptions([
+     "-headers",
+     "User-Agent: Mozilla/5.0 (Linux; Android 10; IPTV)\r\n" +
+     "Referer: http://xvip.pro/\r\n" +
+     "Origin: http://xvip.pro\r\n" +
+     "Accept: */*\r\n" +
+     "Connection: keep-alive\r\n",
+      
         // 👇 إجبار FFmpeg على Live TS
       "-f", "mpegts",
       "-use_wallclock_as_timestamps", "1",
