@@ -23,7 +23,7 @@ const CONFIG = {
     botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",
     chatId: "-1002181683719",
   },
-  startupDelay: 110000, // 1 minute 50 seconds in milliseconds for ALL servers
+  startupDelay: 1000, // 1 minute 50 seconds in milliseconds for ALL servers
 };
 
 const CACHE_FILE = "./streams_cache.json";
