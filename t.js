@@ -756,14 +756,21 @@ async function handleTelegramCommand(update) {
 }
 
 // Poll Telegram for updates
+// No import needed for AbortController in Node 18+
 async function telegramBotPolling() {
   let offset = 0;
 
   while (systemState === "running") {
     try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 35000); // abort after 35s
+
       const response = await fetch(
-        `https://api.telegram.org/bot${CONFIG.telegram.botToken}/getUpdates?offset=${offset}&timeout=30`
+        `https://api.telegram.org/bot${CONFIG.telegram.botToken}/getUpdates?offset=${offset}&timeout=30`,
+        { signal: controller.signal }
       );
+
+      clearTimeout(timeout);
 
       const data = await response.json();
 
@@ -774,13 +781,18 @@ async function telegramBotPolling() {
         }
       }
     } catch (error) {
-      console.error("Telegram polling error:", error);
+      if (error.name === "AbortError") {
+        console.log("⏱️ Telegram polling timeout, retrying...");
+      } else {
+        console.error("Telegram polling error:", error);
+      }
       await new Promise((r) => setTimeout(r, 5000));
     }
 
     await new Promise((r) => setTimeout(r, 1000));
   }
 }
+
 
 /* ================= FINAL CHECK ================= */
 
@@ -886,6 +898,7 @@ async function boot() {
 
     // Start Telegram bot polling immediately
     telegramBotPolling();
+    
     log(`🤖 Telegram bot polling started`);
   } catch (error) {
     log(`❌ Boot failed: ${error.message}`);
