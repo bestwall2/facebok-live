@@ -134,7 +134,7 @@ async function getStreamAndDash(liveId, token) {
       };
     }
     log(`⏳ Waiting for stream URL (attempt ${i + 1}/6)...`);
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, 3000));
   }
   throw new Error("Preview not ready");
 }
@@ -197,9 +197,9 @@ function stopFFmpeg(id) {
 
 function restartFFmpeg(item) {
   if (systemState !== "running") return;
-  log(`🔄 Restarting ${item.name} in 60 seconds...`);
+  log(`🔄 Restarting ${item.name} in " minuets...`);
   stopFFmpeg(item.id);
-  setTimeout(() => startFFmpegWithDelay(item), 60000);
+  setTimeout(() => startFFmpegWithDelay(item), 180000);
 }
 
 /* ================= DELAYED START FUNCTION ================= */
