@@ -8,9 +8,8 @@
  * - 1:50 minute initial delay for ALL servers
  * - 30 second delay for NEW servers
  * - 2 minute delay for CRASHED servers
- * - 3:45 hour stream key rotation
+ * - 3:45 hour stream key rotation (NO quality checks)
  * - Server shutdown reports
- * - Quality monitoring
  ******************************************************************/
 
 import fs from "fs";
@@ -28,11 +27,10 @@ const CONFIG = {
     botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",
     chatId: "-1002181683719",
   },
-  initialDelay: 2 * 30000, // 1:50 minutes for ALL servers initial start
+  initialDelay: 110000, // 1:50 minutes for ALL servers initial start
   newServerDelay: 30000, // 30 seconds for NEW servers
   crashedServerDelay: 120000, // 2 minutes (120 seconds) for CRASHED servers
   rotationInterval: 13500000, // 3:45 hours in milliseconds (3*60*60*1000 + 45*60*1000)
-  qualityCheckInterval: 300000, // 5 minutes quality check
 };
 
 const CACHE_FILE = "./streams_cache.json";
@@ -47,7 +45,6 @@ let streamStartTimes = new Map(); // track stream start times
 let streamRotationTimers = new Map(); // rotation timers
 let restartTimers = new Map(); // restart timers
 let serverStates = new Map(); // server states: 'starting', 'running', 'restarting', 'rotating'
-let qualityCheckTimers = new Map(); // quality check timers
 let startupTimer = null; // for initial startup delay
 
 /* ================= CACHE ================= */
@@ -180,49 +177,58 @@ function startFFmpeg(item) {
       "-hide_banner",
       "-loglevel",
       "error",
-      "-rw_timeout",
-      "10000000",
+      "-re", // Read input at native frame rate
       "-thread_queue_size",
-      "8192",
-      "-reconnect",
-      "1",
-      "-reconnect_at_eof",
-      "1",
-      "-reconnect_streamed",
-      "1",
-      "-reconnect_delay_max",
-      "5",
-      "-err_detect",
-      "ignore_err",
-      "-re",
+      "512", // Smaller queue for lower latency
+      "-rtbufsize",
+      "256M", // Real-time buffer size
+      "-probesize",
+      "32", // Smaller probe size for faster startup
+      "-analyzeduration",
+      "0", // No analysis delay
     ])
     .videoCodec("libx264")
     .audioCodec("aac")
     .outputOptions([
+      // Video encoding settings
       "-preset",
-      "veryfast",
+      "ultrafast", // Fastest encoding (less CPU)
       "-tune",
-      "zerolatency",
+      "zerolatency", // Zero latency tuning
       "-b:v",
-      "3000k",
+      "2500k", // Bitrate (adjust based on source)
       "-maxrate",
-      "3000k",
+      "2500k", // Maximum bitrate
       "-bufsize",
-      "6000k",
+      "5000k", // Buffer size
       "-pix_fmt",
-      "yuv420p",
+      "yuv420p", // Pixel format
       "-g",
-      "60",
+      "50", // Keyframe interval (2 seconds for 25fps)
+      "-r",
+      "25", // Frame rate (standard)
+
+      // Audio encoding settings
       "-b:a",
-      "128k",
+      "96k", // Audio bitrate
       "-ar",
-      "44100",
+      "44100", // Audio sample rate
       "-ac",
-      "2",
+      "2", // Audio channels
+
+      // FLV output settings
       "-f",
       "flv",
       "-flvflags",
       "no_duration_filesize",
+
+      // Network/streaming optimizations
+      "-avoid_negative_ts",
+      "make_zero",
+      "-muxdelay",
+      "0", // No muxing delay
+      "-muxpreload",
+      "0", // No preload delay
     ])
     .output(cache.stream_url)
     .on("start", (commandLine) => {
@@ -230,11 +236,8 @@ function startFFmpeg(item) {
       streamStartTimes.set(item.id, Date.now());
       serverStates.set(item.id, "running");
 
-      // Start rotation timer (3:45 hours)
+      // Start rotation timer (3:45 hours) - ONLY THIS REMAINS
       startRotationTimer(item);
-
-      // Start quality check timer
-      startQualityCheckTimer(item);
     })
     .on("error", (err, stdout, stderr) => {
       log(`❌ FFmpeg error for ${item.name}: ${err.message}`);
@@ -243,16 +246,6 @@ function startFFmpeg(item) {
     .on("end", () => {
       log(`🔚 FFmpeg ended for ${item.name}`);
       handleStreamCrash(item, "Stream ended unexpectedly");
-    })
-    .on("stderr", (stderrLine) => {
-      // Only log critical errors
-      if (
-        stderrLine.includes("error") ||
-        stderrLine.includes("Error") ||
-        stderrLine.includes("failed")
-      ) {
-        log(`⚠️ ${item.name} stderr: ${stderrLine.substring(0, 100)}`);
-      }
     });
 
   activeStreams.set(item.id, cmd);
@@ -328,12 +321,6 @@ function stopFFmpeg(id, skipReport = false) {
     }
   } catch (err) {
     log(`❌ Error stopping ${id}: ${err.message}`);
-  }
-
-  // Clear timers
-  if (qualityCheckTimers.has(id)) {
-    clearTimeout(qualityCheckTimers.get(id));
-    qualityCheckTimers.delete(id);
   }
 
   activeStreams.delete(id);
@@ -413,77 +400,6 @@ async function rotateStreamKey(item) {
       }
     }, 300000);
   }
-}
-
-/* ================= QUALITY MONITORING ================= */
-
-function startQualityCheckTimer(item) {
-  // Clear existing timer
-  if (qualityCheckTimers.has(item.id)) {
-    clearTimeout(qualityCheckTimers.get(item.id));
-  }
-
-  const qualityTimer = setTimeout(async () => {
-    await checkStreamQuality(item);
-  }, CONFIG.qualityCheckInterval);
-
-  qualityCheckTimers.set(item.id, qualityTimer);
-}
-
-async function checkStreamQuality(item) {
-  try {
-    const cache = streamCache.get(item.id);
-    if (!cache || !cache.liveId) return;
-
-    // Check stream status on Facebook
-    const r = await fetch(
-      `https://api.facebook.com/v24.0/${cache.liveId}?fields=status,ingest_streams&access_token=${item.token}`
-    );
-    const data = await r.json();
-
-    if (
-      data.ingest_streams &&
-      data.ingest_streams.data &&
-      data.ingest_streams.data.length > 0
-    ) {
-      const stream = data.ingest_streams.data[0];
-      if (stream.status === "active") {
-        log(`✅ ${item.name} quality check passed`);
-        // Restart quality timer
-        startQualityCheckTimer(item);
-        return;
-      }
-    }
-
-    log(`⚠️ ${item.name} quality check failed - stream not active on Facebook`);
-
-    // If stream is not active on Facebook but FFmpeg is running, restart it
-    if (activeStreams.has(item.id)) {
-      log(`🔄 ${item.name} will restart due to quality check failure`);
-      handleStreamCrash(item, "Facebook quality check failed");
-    }
-  } catch (error) {
-    log(`❌ Quality check error for ${item.name}: ${error.message}`);
-    // Restart timer anyway
-    startQualityCheckTimer(item);
-  }
-}
-
-/* ================= DELAYED START FUNCTION ================= */
-
-function startFFmpegWithDelay(item, isNewServer = true) {
-  const delayMs = isNewServer
-    ? CONFIG.newServerDelay
-    : CONFIG.crashedServerDelay;
-  const delayType = isNewServer ? "30 seconds" : "2 minutes";
-
-  log(`⏰ ${item.name} will start in ${delayType}`);
-
-  setTimeout(() => {
-    if (systemState === "running") {
-      startFFmpeg(item);
-    }
-  }, delayMs);
 }
 
 /* ================= UPTIME CALCULATION ================= */
@@ -664,10 +580,6 @@ async function watcher() {
         if (streamRotationTimers.has(id)) {
           clearTimeout(streamRotationTimers.get(id));
           streamRotationTimers.delete(id);
-        }
-        if (qualityCheckTimers.has(id)) {
-          clearTimeout(qualityCheckTimers.get(id));
-          qualityCheckTimers.delete(id);
         }
 
         stopFFmpeg(id, true);
@@ -910,9 +822,6 @@ async function gracefulShutdown() {
     clearTimeout(timer);
   });
   streamRotationTimers.forEach((timer, id) => {
-    clearTimeout(timer);
-  });
-  qualityCheckTimers.forEach((timer, id) => {
     clearTimeout(timer);
   });
 
