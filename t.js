@@ -105,6 +105,7 @@ async function tg(msg, chatId = CONFIG.telegram.chatId) {
 
 async function createLive(token, name) {
   log(`🌐 Creating Facebook Live for: ${name}`);
+
   const r = await fetch("https://graph.facebook.com/v24.0/me/live_videos", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -367,11 +368,9 @@ async function rotateStreamKey(item) {
     log(`⏰ ${item.name} will start with new key in 30 seconds`);
     serverStates.set(item.id, "starting");
 
+    // ✅ NEW - correct
     setTimeout(() => {
-      if (
-        systemState === "running" &&
-        serverStates.get(item.id) === "starting"
-      ) {
+      if (systemState === "running") {
         startFFmpeg(item);
       }
     }, CONFIG.newServerDelay); // 30 SECONDS for rotation (treated as new server)
@@ -537,17 +536,13 @@ async function watcher() {
 
           // Wait 30 SECONDS before starting NEW servers
           log(`⏰ New server ${item.name} will start in 30 seconds`);
-          serverStates.set(id, "starting");
-
           setTimeout(() => {
-            if (
-              systemState === "running" &&
-              serverStates.get(id) === "starting"
-            ) {
+            if (systemState === "running") {
               log(`▶ Starting NEW server: ${item.name}`);
               startFFmpeg(item);
             }
-          }, CONFIG.newServerDelay); // 30 SECONDS for NEW servers
+          }, CONFIG.newServerDelay);
+ // 30 SECONDS for NEW servers
         } catch (error) {
           log(`❌ Error creating live for ${item.name}: ${error.message}`);
         }
