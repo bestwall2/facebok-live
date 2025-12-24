@@ -172,81 +172,65 @@ function startFFmpeg(item) {
     restartTimers.delete(item.id);
   }
 
-  const cmd = ffmpeg(item.source)
-    .inputOptions([
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-re", // Read input at native frame rate
-      "-thread_queue_size",
-      "512", // Smaller queue for lower latency
-      "-rtbufsize",
-      "256M", // Real-time buffer size
-      "-probesize",
-      "32", // Smaller probe size for faster startup
-      "-analyzeduration",
-      "0", // No analysis delay
-    ])
-    .videoCodec("libx264")
-    .audioCodec("aac")
-    .outputOptions([
-      // Video encoding settings
-      "-preset",
-      "ultrafast", // Fastest encoding (less CPU)
-      "-tune",
-      "zerolatency", // Zero latency tuning
-      "-b:v",
-      "2500k", // Bitrate (adjust based on source)
-      "-maxrate",
-      "2500k", // Maximum bitrate
-      "-bufsize",
-      "5000k", // Buffer size
-      "-pix_fmt",
-      "yuv420p", // Pixel format
-      "-g",
-      "50", // Keyframe interval (2 seconds for 25fps)
-      "-r",
-      "25", // Frame rate (standard)
+ const cmd = ffmpeg(item.source)
+   .inputOptions([
+     "-hide_banner",
+     "-loglevel",
+     "error",
+     "-re",
+     // --- CRITICAL RECONNECT STRATEGY ---
+     "-reconnect",
+     "1",
+     "-reconnect_at_eof",
+     "1",
+     "-reconnect_streamed",
+     "1",
+     "-reconnect_delay_max",
+     "5", // Try reconnecting for up to 5 seconds
+     "-fflags",
+     "+genpts+igndts", // Ignore timestamp errors from the M3U
+     // ----------------------------------
+   ])
+   .outputOptions([
+     "-preset",
+     "veryfast",
+     "-tune",
+     "zerolatency",
+     "-b:v",
+     "2500k",
+     "-g",
+     "60",
+     "-r",
+     "30",
+     "-bufsize",
+     "5000k",
+     "-pix_fmt",
+     "yuv420p",
+     "-f",
+     "flv",
+     // --- FLV STABILITY ---
+     "-flvflags",
+     "no_duration_filesize",
+     "-rtmp_live",
+     "live", // Specify it is a live stream
+   ])
+   .output(cache.stream_url)
+   .on("start", (commandLine) => {
+     log(`✅ FFmpeg started for ${item.name}`);
+     streamStartTimes.set(item.id, Date.now());
+     serverStates.set(item.id, "running");
 
-      // Audio encoding settings
-      "-b:a",
-      "96k", // Audio bitrate
-      "-ar",
-      "44100", // Audio sample rate
-      "-ac",
-      "2", // Audio channels
-
-      // FLV output settings
-      "-f",
-      "flv",
-      "-flvflags",
-      "no_duration_filesize",
-
-      // Network/streaming optimizations
-      "-avoid_negative_ts",
-      "make_zero",
-      "-muxdelay",
-      "0", // No muxing delay
-      "-muxpreload",
-      "0", // No preload delay
-    ])
-    .output(cache.stream_url)
-    .on("start", (commandLine) => {
-      log(`✅ FFmpeg started for ${item.name}`);
-      streamStartTimes.set(item.id, Date.now());
-      serverStates.set(item.id, "running");
-
-      // Start rotation timer (3:45 hours) - ONLY THIS REMAINS
-      startRotationTimer(item);
-    })
-    .on("error", (err, stdout, stderr) => {
-      log(`❌ FFmpeg error for ${item.name}: ${err.message}`);
-      handleStreamCrash(item, err.message);
-    })
-    .on("end", () => {
-      log(`🔚 FFmpeg ended for ${item.name}`);
-      handleStreamCrash(item, "Stream ended unexpectedly");
-    });
+     // Start rotation timer (3:45 hours) - ONLY THIS REMAINS
+     startRotationTimer(item);
+   })
+   .on("error", (err, stdout, stderr) => {
+     log(`❌ FFmpeg error for ${item.name}: ${err.message}`);
+     handleStreamCrash(item, err.message);
+   })
+   .on("end", () => {
+     log(`🔚 FFmpeg ended for ${item.name}`);
+     handleStreamCrash(item, "Stream ended unexpectedly");
+   });
 
   activeStreams.set(item.id, cmd);
   cmd.run();
