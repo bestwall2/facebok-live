@@ -139,7 +139,7 @@ class StreamManager {
       item.preview = preview;
       
       const rawUrl = preview.stream_url;
-      consol.log(rawUrl);
+      consol.log(preview);
       //const streamKey = preview.stream_url;
       if (!streamKey) throw new Error("No stream key available");
       item.rtmps = rawUrl;
