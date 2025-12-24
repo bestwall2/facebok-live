@@ -137,7 +137,7 @@ class StreamManager {
       await new Promise(r => setTimeout(r, 2000));
       const preview = await FacebookAPI.getPreview(item.streamId, item.token);
       item.preview = preview;
-      
+      Logger.info(`Starting stream: ${preview}`);
       const rawUrl = preview.stream_url;
       consol.log(preview);
       //const streamKey = preview.stream_url;
