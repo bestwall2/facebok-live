@@ -1,8 +1,3 @@
-/******************************************************************
- * FACEBOOK MULTI STREAM MANAGER – CONTROL MODE
- * STREAM KEY EXTRACT + -c copy + SAFE STOP + INDEPENDENT RETRY
- ******************************************************************/
-
 import fs from "fs";
 import ffmpeg from "fluent-ffmpeg";
 import fetch from "node-fetch";
@@ -26,17 +21,8 @@ const CONTROL_HEADERS = {
 };
 
 const FACEBOOK_FFMPEG_OPTIONS = {
-  input: [
-    "-re",
-    "-fflags", "+genpts",
-    "-avoid_negative_ts", "make_zero",
-    "-user_agent", "Mozilla/5.0"
-  ],
-  output: [
-    "-c", "copy",
-    "-f", "flv",
-    "-flvflags", "no_duration_filesize"
-  ]
+  input: ["-re", "-fflags", "+genpts", "-avoid_negative_ts", "make_zero", "-user_agent", "Mozilla/5.0"],
+  output: ["-c", "copy", "-f", "flv", "-flvflags", "no_duration_filesize"]
 };
 
 let allItems = new Map();
@@ -46,7 +32,6 @@ let lastProcessedAction = null;
 let lastProcessedId = null;
 let controlPollTimer = null;
 let healthCheckTimer = null;
-let reportTimer = null;
 let startTime = Date.now();
 let isProcessingAction = false;
 
@@ -80,8 +65,7 @@ class Telegram {
 
 class FacebookAPI {
   static async createLive(token, name) {
-    const url = "https://graph.facebook.com/v24.0/me/live_videos";
-    const res = await fetch(url, {
+    const res = await fetch("https://graph.facebook.com/v24.0/me/live_videos", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title: name, status: "UNPUBLISHED", access_token: token })
@@ -91,43 +75,28 @@ class FacebookAPI {
     return { id: json.id };
   }
 
-  static async getPreview(liveId, token, retries = 10, delay = 3000) {
+  static async getPreview(liveId, token, retries = 5, interval = 2000) {
+    const fields = "status,stream_url,secure_stream_url,dash_preview_url,permalink_url,embed_html";
+    let preview = null;
     for (let i = 0; i < retries; i++) {
-      const fields = "status,stream_url,secure_stream_url,dash_preview_url,permalink_url,embed_html";
-      const url = `https://graph.facebook.com/v24.0/${liveId}?fields=${fields}&access_token=${encodeURIComponent(token)}`;
-      const res = await fetch(url);
+      const res = await fetch(`https://graph.facebook.com/v24.0/${liveId}?fields=${fields}&access_token=${encodeURIComponent(token)}`);
       const json = await res.json();
-
       if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
-
-      if (json.stream_url || json.secure_stream_url) {
-        console.log("Preview ready:", json);
-        return {
-          status: json.status ?? null,
-          stream_url: json.stream_url ?? null,
-          secure_stream_url: json.secure_stream_url ?? null,
-          dash_preview_url: json.dash_preview_url ?? null,
-          permalink_url: json.permalink_url ?? null,
-          embed_html: json.embed_html ?? null
-        };
-      }
-
-      console.log(`Preview not ready yet, retrying in ${delay}ms...`);
-      await new Promise(r => setTimeout(r, delay));
+      preview = {
+        status: json.status ?? null,
+        stream_url: json.stream_url ?? null,
+        secure_stream_url: json.secure_stream_url ?? null,
+        dash_preview_url: json.dash_preview_url ?? null,
+        permalink_url: json.permalink_url ?? null,
+        embed_html: json.embed_html ?? null
+      };
+      console.log("Preview fetched:", preview);
+      if (preview.stream_url) break;
+      await new Promise(r => setTimeout(r, interval));
     }
-
-    throw new Error("Preview not available after retries");
+    if (!preview.stream_url) throw new Error("No stream_url available after retries");
+    return preview;
   }
-}
-
-function extractMPDFromPreview(preview) {
-  if (!preview) return null;
-  const candidates = [preview.dash_preview_url, preview.secure_stream_url, preview.stream_url, preview.permalink_url];
-  for (const candidate of candidates) {
-    if (!candidate) continue;
-    if (candidate.includes(".mpd") || candidate.includes("dash") || candidate.includes("manifest")) return candidate;
-  }
-  return null;
 }
 
 function escapeHtml(text) {
@@ -140,14 +109,9 @@ class StreamManager {
     Logger.info(`Starting stream: ${item.name}`);
     try {
       await new Promise(r => setTimeout(r, 2000));
-      
-      const preview = await FacebookAPI.getPreview(item.streamId, item.token, 10, 3000);
+      const preview = await FacebookAPI.getPreview(item.streamId, item.token);
       item.preview = preview;
-
-      const rawUrl = preview.secure_stream_url || preview.stream_url;
-      if (!rawUrl) throw new Error("No valid stream URL from Facebook live ID");
-
-      console.log("Streaming to:", rawUrl);
+      const rawUrl = preview.stream_url;
       item.rtmps = rawUrl;
 
       const cmd = ffmpeg(item.source)
@@ -157,10 +121,7 @@ class StreamManager {
         .on("start", async commandLine => {
           Logger.success(`Stream started: ${item.name}`);
           fs.appendFileSync(`ffmpeg_${item.id}.cmd.txt`, commandLine + "\n");
-
-          const mpd = extractMPDFromPreview(preview) || "N/A";
-          const msg = `✅ <b>LIVE</b>\n<b>${escapeHtml(item.name)}</b>\nChannel: ${preview.permalink_url || "N/A"}\nDASH preview (MPD): ${mpd}\nRTMPS: ${item.rtmps}`;
-          await Telegram.send(msg);
+          await Telegram.send(`✅ <b>LIVE</b>\n<b>${escapeHtml(item.name)}</b>\nRTMPS URL:\n${rawUrl}`);
         })
         .on("progress", () => {
           const streamInfo = activeStreams.get(item.id);
@@ -192,13 +153,10 @@ class StreamManager {
     activeStreams.delete(item.id);
 
     Logger.warn(`Stream ${item.name} stopped: ${reason}. Will retry in 1 minute.`);
-
     setTimeout(async () => {
       if (systemState !== "running") return;
-      try { await StreamManager.startFFmpeg(item); } catch (e) {
-        Logger.error(`Retry failed for ${item.name}: ${e.message}`);
-      }
-    }, 60000); // 1 minute
+      await StreamManager.startFFmpeg(item);
+    }, 60000);
   }
 
   static stopAll() {
@@ -224,10 +182,7 @@ class System {
   }
 
   static async start() {
-    if (systemState === "running") {
-      Logger.warn("System already running");
-      return;
-    }
+    if (systemState === "running") return Logger.warn("System already running");
     systemState = "running";
     startTime = Date.now();
     Logger.success("SYSTEM START");
@@ -242,7 +197,6 @@ class System {
         await StreamManager.startFFmpeg(item);
         await new Promise(r => setTimeout(r, 2000));
       }
-      await System.sendPreviewReport();
     } catch (e) {
       Logger.error(`System start failed: ${e.message}`);
       await Telegram.send(`❌ <b>SYSTEM START FAILED</b>\n${escapeHtml(e.message)}`);
@@ -258,24 +212,6 @@ class System {
 
     StreamManager.stopAll();
     await Telegram.send(`⛔ <b>SYSTEM STOPPED</b>\n${escapeHtml(reason)}`);
-    Logger.success("System stopped successfully");
-  }
-
-  static async sendPreviewReport() {
-    const lines = [];
-    for (const item of allItems.values()) {
-      let preview = item.preview;
-      if (!preview && item.streamId) {
-        try { preview = await FacebookAPI.getPreview(item.streamId, item.token); item.preview = preview; } catch {}
-      }
-      const mpd = extractMPDFromPreview(preview) || "N/A";
-      const rtmps = (preview && (preview.stream_url || preview.secure_stream_url)) || "N/A";
-      const permalink = (preview && preview.permalink_url) || "N/A";
-      lines.push(`<b>${escapeHtml(item.name)}</b>\nChannel: ${permalink}\nDASH: ${mpd}\nRTMPS: ${rtmps}`);
-    }
-    const text = `📡 <b>LIVE PREVIEW REPORT</b>\n\n${lines.join("\n\n")}`;
-    await Telegram.send(text);
-    Logger.info("Preview report sent to telegram");
   }
 }
 
@@ -294,17 +230,14 @@ async function pollControlAPI() {
     const id = record?.id;
 
     if (lastProcessedId === id && lastProcessedAction === action) return;
-    Logger.info(`Control API: action="${action}", id=${id}, current state="${systemState}"`);
 
     if (action === "start" && systemState !== "running") {
       await System.start();
-      lastProcessedAction = action;
-      lastProcessedId = id;
     } else if (action === "stop" && systemState !== "stopped") {
       await System.stop("Supabase Control API");
-      lastProcessedAction = action;
-      lastProcessedId = id;
     }
+    lastProcessedAction = action;
+    lastProcessedId = id;
   } catch (err) {
     Logger.error("Control API poll error: " + err.message);
   } finally {
@@ -323,38 +256,24 @@ function healthCheck() {
   });
 }
 
-async function statusReport() {
-  if (systemState !== "running") return;
-  const uptimeMinutes = Math.floor((Date.now() - startTime) / 60000);
-  await Telegram.send(`📡 STATUS\nState: ${systemState}\nUptime: ${uptimeMinutes} min\nActive: ${activeStreams.size}/${allItems.size}`);
-}
-
 function startIntervals() {
   if (controlPollTimer) clearInterval(controlPollTimer);
   if (healthCheckTimer) clearInterval(healthCheckTimer);
-  if (reportTimer) clearInterval(reportTimer);
 
   controlPollTimer = setInterval(pollControlAPI, CONFIG.controlPollInterval);
   healthCheckTimer = setInterval(healthCheck, CONFIG.healthCheckInterval);
-  reportTimer = setInterval(statusReport, CONFIG.reportInterval);
-
-  Logger.success("Intervals started");
 }
 
 process.on("SIGINT", async () => {
-  Logger.warn("Received SIGINT, shutting down gracefully...");
   if (controlPollTimer) clearInterval(controlPollTimer);
   if (healthCheckTimer) clearInterval(healthCheckTimer);
-  if (reportTimer) clearInterval(reportTimer);
   await System.stop("Process shutdown");
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
-  Logger.warn("Received SIGTERM, shutting down gracefully...");
   if (controlPollTimer) clearInterval(controlPollTimer);
   if (healthCheckTimer) clearInterval(healthCheckTimer);
-  if (reportTimer) clearInterval(reportTimer);
   await System.stop("Process shutdown");
   process.exit(0);
 });
@@ -362,5 +281,3 @@ process.on("SIGTERM", async () => {
 Logger.success("SYSTEM READY - WAITING FOR START");
 startIntervals();
 pollControlAPI();
-
-export default System;
