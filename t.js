@@ -33,7 +33,6 @@ const CONFIG = {
   crashedServerDelay: 120000, // 2 minutes (120 seconds) for CRASHED servers
   rotationInterval: 13500000, // 3:45 hours in milliseconds (3*60*60*1000 + 45*60*1000)
   qualityCheckInterval: 300000, // 5 minutes quality check
-  maxRestartAttempts: 5, // Max restart attempts before giving up
 };
 
 const CACHE_FILE = "./streams_cache.json";
@@ -47,7 +46,6 @@ let streamCache = new Map(); // stream_url cache
 let streamStartTimes = new Map(); // track stream start times
 let streamRotationTimers = new Map(); // rotation timers
 let restartTimers = new Map(); // restart timers
-let restartCounters = new Map(); // restart attempt counters
 let serverStates = new Map(); // server states: 'starting', 'running', 'restarting', 'rotating'
 let qualityCheckTimers = new Map(); // quality check timers
 let startupTimer = null; // for initial startup delay
@@ -179,15 +177,24 @@ function startFFmpeg(item) {
 
   const cmd = ffmpeg(item.source)
     .inputOptions([
-      "-re",
+      "-hide_banner",
       "-loglevel",
-      "quiet",
+      "error",
       "-rw_timeout",
-      "5000000", // Increase timeout to 5 seconds
-      "-stimeout",
-      "5000000", // Socket timeout 5 seconds
+      "10000000",
       "-thread_queue_size",
-      "1024", // Larger queue size
+      "8192",
+      "-reconnect",
+      "1",
+      "-reconnect_at_eof",
+      "1",
+      "-reconnect_streamed",
+      "1",
+      "-reconnect_delay_max",
+      "5",
+      "-err_detect",
+      "ignore_err",
+      "-re",
     ])
     .videoCodec("libx264")
     .audioCodec("aac")
@@ -222,7 +229,6 @@ function startFFmpeg(item) {
       log(`✅ FFmpeg started for ${item.name}`);
       streamStartTimes.set(item.id, Date.now());
       serverStates.set(item.id, "running");
-      restartCounters.set(item.id, 0); // Reset restart counter on successful start
 
       // Start rotation timer (3:45 hours)
       startRotationTimer(item);
@@ -277,28 +283,7 @@ function handleStreamCrash(item, reason) {
       `Status: Will restart in 2 minutes`
   );
 
-  // Check restart attempts
-  const attempts = (restartCounters.get(item.id) || 0) + 1;
-  restartCounters.set(item.id, attempts);
-
-  if (attempts > CONFIG.maxRestartAttempts) {
-    log(
-      `❌ ${item.name} exceeded max restart attempts (${CONFIG.maxRestartAttempts}), giving up`
-    );
-    tg(
-      `🚨 <b>MAX RESTART ATTEMPTS EXCEEDED</b>\n\n` +
-        `<b>${item.name}</b>\n` +
-        `Failed to restart after ${attempts} attempts\n` +
-        `Server will remain offline until next rotation`
-    );
-    serverStates.set(item.id, "failed");
-    stopFFmpeg(item.id);
-    return;
-  }
-
-  log(
-    `🔄 ${item.name} will restart in 2 minutes (attempt ${attempts}/${CONFIG.maxRestartAttempts})`
-  );
+  log(`🔄 ${item.name} will restart in 2 minutes`);
 
   // Schedule restart in 2 MINUTES (120 seconds) for crashed servers
   serverStates.set(item.id, "restarting");
@@ -309,7 +294,7 @@ function handleStreamCrash(item, reason) {
       systemState === "running" &&
       serverStates.get(item.id) === "restarting"
     ) {
-      log(`▶ Attempting restart ${item.name} (attempt ${attempts})`);
+      log(`▶ Attempting restart ${item.name}`);
       startFFmpeg(item);
     }
   }, CONFIG.crashedServerDelay); // 2 MINUTES for crashed servers
@@ -596,7 +581,6 @@ async function generateInfoReport() {
       report += `• Uptime: ${formatUptime(
         startTime ? Date.now() - startTime : 0
       )}\n`;
-      report += `• Restarts: ${restartCounters.get(id) || 0}\n`;
       report += `• DASH: <code>${cache.dash}</code>\n`;
 
       streamCount++;
@@ -689,7 +673,6 @@ async function watcher() {
         stopFFmpeg(id, true);
         streamCache.delete(id);
         streamStartTimes.delete(id);
-        restartCounters.delete(id);
         serverStates.delete(id);
         saveCache();
       }
