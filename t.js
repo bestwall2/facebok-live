@@ -27,9 +27,9 @@ const CONFIG = {
     botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",
     chatId: "-1002181683719",
   },
-  initialDelay: 1000, // 1:50 minutes for ALL servers initial start
+  initialDelay: 50000, // 1:50 minutes for ALL servers initial start (110 seconds)
   newServerDelay: 30000, // 30 seconds for NEW servers
-  crashedServerDelay: 120000, // 2 minutes (120 seconds) for CRASHED servers
+  crashedServerDelay: 115000, // 2 minutes (120 seconds) for CRASHED servers
   rotationInterval: 13500000, // 3:45 hours in milliseconds (3*60*60*1000 + 45*60*1000)
 };
 
@@ -155,10 +155,9 @@ function startFFmpeg(item, force = false) {
     return;
   }
 
-  // Check if already starting or restarting
-  const state = serverStates.get(item.id);
-  if (!force && (state === "starting" || state === "restarting")) {
-    log(`⚠️ ${item.name} is already starting/restarting, skipping`);
+  // Check if already running
+  if (activeStreams.has(item.id) && !force) {
+    log(`⚠️ ${item.name} is already running, skipping`);
     return;
   }
 
@@ -239,7 +238,6 @@ function startFFmpeg(item, force = false) {
   cmd.run();
 }
 
-
 function handleStreamCrash(item, reason) {
   const state = serverStates.get(item.id);
 
@@ -271,10 +269,7 @@ function handleStreamCrash(item, reason) {
   stopFFmpeg(item.id);
 
   const restartTimer = setTimeout(() => {
-    if (
-      systemState === "running" &&
-      serverStates.get(item.id) === "restarting"
-    ) {
+    if (systemState === "running") {
       log(`▶ Attempting restart ${item.name}`);
       startFFmpeg(item);
     }
@@ -366,9 +361,7 @@ async function rotateStreamKey(item) {
 
     // Start with new key after 30 seconds (NEW server delay)
     log(`⏰ ${item.name} will start with new key in 30 seconds`);
-    serverStates.set(item.id, "starting");
 
-    // ✅ NEW - correct
     setTimeout(() => {
       if (systemState === "running") {
         startFFmpeg(item);
@@ -542,7 +535,6 @@ async function watcher() {
               startFFmpeg(item);
             }
           }, CONFIG.newServerDelay);
- // 30 SECONDS for NEW servers
         } catch (error) {
           log(`❌ Error creating live for ${item.name}: ${error.message}`);
         }
@@ -560,7 +552,7 @@ async function watcher() {
           restartTimers.delete(id);
         }
         if (streamRotationTimers.has(id)) {
-          clearTimeout(streamRotationTimers.get(id));
+          clearTimeout(streamRotationTimers.get(item.id));
           streamRotationTimers.delete(id);
         }
 
