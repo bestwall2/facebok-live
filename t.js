@@ -20,7 +20,6 @@ import os from "os";
 import process from "process";
 
 /* ================= CONFIG ================= */
-
 const CONFIG = {
   streamsApi: "https://ani-box-nine.vercel.app/api/grok-chat",
   pollInterval: 20000,
@@ -30,59 +29,40 @@ const CONFIG = {
   },
   initialDelay: 110000, // 1:50 minutes for ALL servers initial start
   newServerDelay: 30000, // 30 seconds for NEW servers
-  crashedServerDelay: 120000, // 2 minutes (120 seconds) for CRASHED servers
-  rotationInterval: 13500000, // 3:45 hours in milliseconds (3*60*60*1000 + 45*60*1000)
+  crashedServerDelay: 120000, // 2 minutes
+  rotationInterval: 13500000, // 3:45 hours
 };
 
 const CACHE_FILE = "./streams_cache.json";
 
 /* ================= STATE ================= */
-
 let systemState = "running";
-let apiItems = new Map(); // current api list
-let activeStreams = new Map(); // ffmpeg processes
-let streamCache = new Map(); // stream_url cache
-let streamStartTimes = new Map(); // track stream start times
-let streamRotationTimers = new Map(); // rotation timers
-let restartTimers = new Map(); // restart timers
-let serverStates = new Map(); // server states: 'starting', 'running', 'restarting', 'rotating'
-let startupTimer = null; // for initial startup delay
+let apiItems = new Map();
+let activeStreams = new Map();
+let streamCache = new Map();
+let streamStartTimes = new Map();
+let streamRotationTimers = new Map();
+let restartTimers = new Map();
+let serverStates = new Map();
+let startupTimer = null;
 
 /* ================= CACHE ================= */
-
 function loadCache() {
-  if (!fs.existsSync(CACHE_FILE)) {
-    log(`📝 No cache file found, starting fresh`);
-    return;
-  }
+  if (!fs.existsSync(CACHE_FILE)) return log("📝 No cache file found, starting fresh");
   try {
     const data = fs.readFileSync(CACHE_FILE, "utf8");
-    if (!data || data.trim() === "") {
-      log(`📝 Cache file is empty, starting fresh`);
-      return;
-    }
-
+    if (!data.trim()) return log("📝 Cache file is empty, starting fresh");
     const json = JSON.parse(data);
-    const entries = Object.entries(json);
-
-    if (entries.length === 0) {
-      log(`📝 Cache file has no entries, starting fresh`);
-      return;
-    }
-
-    entries.forEach(([k, v]) => streamCache.set(k, v));
+    Object.entries(json).forEach(([k, v]) => streamCache.set(k, v));
     log(`✅ Loaded ${streamCache.size} cached streams from file`);
   } catch (error) {
     log(`❌ Error loading cache: ${error.message}`);
-    // If cache is corrupted, rename it and start fresh
     try {
       const backupName = `${CACHE_FILE}.corrupted.${Date.now()}`;
       fs.renameSync(CACHE_FILE, backupName);
       log(`⚠️ Corrupted cache backed up to: ${backupName}`);
-    } catch (e) {
-      log(`⚠️ Could not backup corrupted cache: ${e.message}`);
-    }
-    streamCache.clear(); // Start with empty cache
+    } catch {}
+    streamCache.clear();
   }
 }
 
@@ -98,11 +78,9 @@ function saveCache() {
 }
 
 /* ================= LOGGER ================= */
-
 const log = (m) => console.log(`[${new Date().toISOString()}] ${m}`);
 
 /* ================= TELEGRAM ================= */
-
 async function tg(msg, chatId = CONFIG.telegram.chatId) {
   try {
     const response = await fetch(
@@ -118,28 +96,20 @@ async function tg(msg, chatId = CONFIG.telegram.chatId) {
         }),
       }
     );
-
     const result = await response.json();
-    if (!result.ok) {
-      log(`❌ Telegram error: ${result.description}`);
-    }
+    if (!result.ok) log(`❌ Telegram error: ${result.description}`);
   } catch (error) {
     log(`❌ Telegram send error: ${error.message}`);
   }
 }
 
 /* ================= FACEBOOK ================= */
-
 async function createLive(token, name) {
   log(`🌐 Creating Facebook Live for: ${name}`);
   const r = await fetch("https://graph.facebook.com/v24.0/me/live_videos", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      title: name,
-      status: "UNPUBLISHED",
-      access_token: token,
-    }),
+    body: JSON.stringify({ title: name, status: "UNPUBLISHED", access_token: token }),
   });
   const j = await r.json();
   if (j.error) {
@@ -153,168 +123,64 @@ async function createLive(token, name) {
 async function getStreamAndDash(liveId, token) {
   log(`🌐 Getting stream URL for Live ID: ${liveId}`);
   const fields = "stream_url,dash_preview_url,status";
-
-  // Try for up to 30 seconds (15 attempts × 2 seconds)
   for (let i = 0; i < 15; i++) {
     try {
-      const r = await fetch(
-        `https://graph.facebook.com/v24.0/${liveId}?fields=${fields}&access_token=${token}`
-      );
-
-      if (!r.ok) {
-        log(`⚠️ Facebook API error ${r.status}, retrying...`);
-        await new Promise((r) => setTimeout(r, 2000));
-        continue;
-      }
-
+      const r = await fetch(`https://graph.facebook.com/v24.0/${liveId}?fields=${fields}&access_token=${token}`);
+      if (!r.ok) { await new Promise(r => setTimeout(r, 2000)); continue; }
       const j = await r.json();
-
-      if (j.error) {
-        log(`⚠️ Facebook API error: ${j.error.message}, retrying...`);
-        await new Promise((r) => setTimeout(r, 2000));
-        continue;
-      }
-
-      if (j.stream_url) {
-        log(`✅ Stream URL ready for ${liveId}`);
-        return {
-          stream_url: j.stream_url,
-          dash: j.dash_preview_url || "N/A",
-          status: j.status || "UNKNOWN",
-        };
-      }
-
-      log(`⏳ Waiting for stream URL (attempt ${i + 1}/15)...`);
-    } catch (error) {
-      log(`⚠️ Network error getting stream URL: ${error.message}, retrying...`);
-    }
-
-    await new Promise((r) => setTimeout(r, 2000));
+      if (j.stream_url) return { stream_url: j.stream_url, dash: j.dash_preview_url || "N/A", status: j.status || "UNKNOWN" };
+      await new Promise(r => setTimeout(r, 2000));
+    } catch { await new Promise(r => setTimeout(r, 2000)); }
   }
-
   throw new Error("Preview not ready after 30 seconds");
 }
 
-/* ================= STABLE STREAM ID GENERATION ================= */
-
+/* ================= STABLE STREAM ID ================= */
 function generateStreamId(name, source) {
-  // Trim and normalize the name
-  const cleanName = name.trim();
-  const cleanSource = source.trim();
-
-  // Create a stable hash from name and source
-  const str = `${cleanName}|${cleanSource}`;
+  const str = `${name.trim()}|${source.trim()}`;
   let hash = 0;
-  for (let i = 0; i < str.length; i++) {
-    const char = str.charCodeAt(i);
-    hash = (hash << 5) - hash + char;
-    hash = hash & hash; // Convert to 32bit integer
-  }
+  for (let i = 0; i < str.length; i++) hash = (hash << 5) - hash + str.charCodeAt(i) & hash;
   return `stream_${Math.abs(hash).toString(16).substring(0, 8)}`;
 }
 
 /* ================= FFMPEG ================= */
-
 function startFFmpeg(item) {
   const cache = streamCache.get(item.id);
-  if (!cache) {
-    log(`❌ No cache for ${item.name}, cannot start`);
-    return;
-  }
-
-  // Check if already starting or restarting
-  if (
-    serverStates.get(item.id) === "starting" ||
-    serverStates.get(item.id) === "restarting"
-  ) {
-    log(`⚠️ ${item.name} is already starting/restarting, skipping`);
-    return;
-  }
+  if (!cache) return log(`❌ No cache for ${item.name}, cannot start`);
+  if (["starting", "restarting"].includes(serverStates.get(item.id))) return log(`⚠️ ${item.name} already starting/restarting`);
 
   log(`▶ STARTING ${item.name} (ID: ${item.id})`);
   serverStates.set(item.id, "starting");
 
-  // Clear any existing restart timer
-  if (restartTimers.has(item.id)) {
-    clearTimeout(restartTimers.get(item.id));
-    restartTimers.delete(item.id);
-  }
+  if (restartTimers.has(item.id)) { clearTimeout(restartTimers.get(item.id)); restartTimers.delete(item.id); }
 
   const cmd = ffmpeg(item.source)
-    .inputOptions([
-      "-hide_banner",
-      "-loglevel",
-      "error",
-      "-re", // Read input at native frame rate
-      "-thread_queue_size",
-      "512", // Smaller queue for lower latency
-      "-rtbufsize",
-      "256M", // Real-time buffer size
-      "-probesize",
-      "32", // Smaller probe size for faster startup
-      "-analyzeduration",
-      "0", // No analysis delay
-    ])
+    .inputOptions(["-re", "-y"])
     .videoCodec("libx264")
-    .audioCodec("aac")
+    .audioCodec("copy")
     .outputOptions([
-      // Video encoding settings
-      "-preset",
-      "ultrafast", // Fastest encoding (less CPU)
-      "-tune",
-      "zerolatency", // Zero latency tuning
-      "-b:v",
-      "2500k", // Bitrate (adjust based on source)
-      "-maxrate",
-      "2500k", // Maximum bitrate
-      "-bufsize",
-      "5000k", // Buffer size
-      "-pix_fmt",
-      "yuv420p", // Pixel format
-      "-g",
-      "50", // Keyframe interval (2 seconds for 25fps)
-      "-r",
-      "25", // Frame rate (standard)
-
-      // Audio encoding settings
-      "-b:a",
-      "96k", // Audio bitrate
-      "-ar",
-      "44100", // Audio sample rate
-      "-ac",
-      "2", // Audio channels
-
-      // FLV output settings
-      "-f",
-      "flv",
-      "-flvflags",
-      "no_duration_filesize",
-
-      // Network/streaming optimizations
-      "-avoid_negative_ts",
-      "make_zero",
-      "-muxdelay",
-      "0", // No muxing delay
-      "-muxpreload",
-      "0", // No preload delay
+      "-ac", "1",
+      "-ar", "44100",
+      "-b:a", "96k",
+      "-pix_fmt", "yuv420p",
+      "-tune", "zerolatency",
+      "-preset", "veryfast",
+      "-maxrate", "2000k",
+      "-f", "flv",
+      "-flvflags", "no_duration_filesize",
+      "-avoid_negative_ts", "make_zero",
+      "-muxdelay", "0",
+      "-muxpreload", "0"
     ])
     .output(cache.stream_url)
-    .on("start", (commandLine) => {
-      log(`✅ FFmpeg started for ${item.name} (ID: ${item.id})`);
-      streamStartTimes.set(item.id, Date.now());
-      serverStates.set(item.id, "running");
-
-      // Start rotation timer (3:45 hours)
+    .on("start", () => { 
+      log(`✅ FFmpeg started for ${item.name}`); 
+      streamStartTimes.set(item.id, Date.now()); 
+      serverStates.set(item.id, "running"); 
       startRotationTimer(item);
     })
-    .on("error", (err, stdout, stderr) => {
-      log(`❌ FFmpeg error for ${item.name} (ID: ${item.id}): ${err.message}`);
-      handleStreamCrash(item, err.message);
-    })
-    .on("end", () => {
-      log(`🔚 FFmpeg ended for ${item.name} (ID: ${item.id})`);
-      handleStreamCrash(item, "Stream ended unexpectedly");
-    });
+    .on("error", err => handleStreamCrash(item, err.message))
+    .on("end", () => handleStreamCrash(item, "Stream ended unexpectedly"));
 
   activeStreams.set(item.id, cmd);
   cmd.run();
@@ -322,45 +188,18 @@ function startFFmpeg(item) {
 
 function handleStreamCrash(item, reason) {
   const state = serverStates.get(item.id);
+  if (state === "rotating") return log(`🔄 ${item.name} crashed during rotation`);
 
-  // Don't send report if we're rotating or intentionally stopping
-  if (state === "rotating") {
-    log(
-      `🔄 ${item.name} crashed during rotation, will continue rotation process`
-    );
-    return;
-  }
-
-  // Send crash report
-  const uptime = streamStartTimes.has(item.id)
-    ? formatUptime(Date.now() - streamStartTimes.get(item.id))
-    : "Unknown";
-
-  tg(
-    `🔴 <b>SERVER CRASH REPORT</b>\n\n` +
-      `<b>${item.name}</b>\n` +
-      `ID: ${item.id}\n` +
-      `Reason: ${reason}\n` +
-      `Uptime: ${uptime}\n` +
-      `Status: Will restart in 2 minutes`
-  );
-
+  const uptime = streamStartTimes.has(item.id) ? formatUptime(Date.now() - streamStartTimes.get(item.id)) : "Unknown";
+  tg(`🔴 <b>SERVER CRASH REPORT</b>\n\n<b>${item.name}</b>\nID: ${item.id}\nReason: ${reason}\nUptime: ${uptime}\nStatus: Will restart in 2 minutes`);
   log(`🔄 ${item.name} (ID: ${item.id}) will restart in 2 minutes`);
 
-  // Schedule restart in 2 MINUTES (120 seconds) for crashed servers
   serverStates.set(item.id, "restarting");
   stopFFmpeg(item.id);
 
   const restartTimer = setTimeout(() => {
-    if (
-      systemState === "running" &&
-      serverStates.get(item.id) === "restarting"
-    ) {
-      log(`▶ Attempting restart ${item.name} (ID: ${item.id})`);
-      startFFmpeg(item);
-    }
-  }, CONFIG.crashedServerDelay); // 2 MINUTES for crashed servers
-
+    if (systemState === "running" && serverStates.get(item.id) === "restarting") startFFmpeg(item);
+  }, CONFIG.crashedServerDelay);
   restartTimers.set(item.id, restartTimer);
 }
 
@@ -368,572 +207,157 @@ function stopFFmpeg(id, skipReport = false) {
   try {
     const proc = activeStreams.get(id);
     if (proc) {
-      proc.kill("SIGTERM"); // Use SIGTERM first for graceful shutdown
-      setTimeout(() => {
-        try {
-          proc.kill("SIGKILL");
-        } catch {} // Force kill if not terminated
-      }, 5000);
-
-      if (!skipReport) {
-        const state = serverStates.get(id);
-        if (state === "running") {
-          const item = apiItems.get(id);
-          if (item) {
-            const uptime = streamStartTimes.has(id)
-              ? formatUptime(Date.now() - streamStartTimes.get(id))
-              : "Unknown";
-            log(
-              `⏹️ Stopped ${item.name} (ID: ${id}) - was running for ${uptime}`
-            );
-          }
-        }
-      }
+      proc.kill("SIGTERM");
+      setTimeout(() => { try { proc.kill("SIGKILL") } catch {} }, 5000);
     }
-  } catch (err) {
-    log(`❌ Error stopping ${id}: ${err.message}`);
-  }
-
+  } catch (err) { log(`❌ Error stopping ${id}: ${err.message}`); }
   activeStreams.delete(id);
   streamStartTimes.delete(id);
 }
 
 /* ================= ROTATION SYSTEM ================= */
-
 function startRotationTimer(item) {
-  // Clear existing rotation timer
-  if (streamRotationTimers.has(item.id)) {
-    clearTimeout(streamRotationTimers.get(item.id));
-  }
-
-  log(
-    `⏰ Rotation timer started for ${item.name} (ID: ${item.id}) - 3:45 hours`
-  );
-
-  const rotationTimer = setTimeout(async () => {
-    log(
-      `🔄 Rotating stream key for ${item.name} (ID: ${item.id}) - 3:45 hours elapsed`
-    );
-    await rotateStreamKey(item);
-  }, CONFIG.rotationInterval);
-
+  if (streamRotationTimers.has(item.id)) clearTimeout(streamRotationTimers.get(item.id));
+  log(`⏰ Rotation timer started for ${item.name} - 3:45 hours`);
+  const rotationTimer = setTimeout(() => rotateStreamKey(item), CONFIG.rotationInterval);
   streamRotationTimers.set(item.id, rotationTimer);
 }
 
 async function rotateStreamKey(item) {
   try {
-    log(`🔄 Starting key rotation for ${item.name} (ID: ${item.id})`);
     serverStates.set(item.id, "rotating");
-
-    // Stop current stream gracefully
     stopFFmpeg(item.id, true);
-
-    // Remove old cache
-    streamCache.delete(item.id);
-    saveCache();
-
-    // Create new live stream
-    log(`🌐 Creating new live stream for ${item.name}`);
+    streamCache.delete(item.id); saveCache();
     const liveId = await createLive(item.token, item.name);
     const preview = await getStreamAndDash(liveId, item.token);
-
-    // Update cache with new stream (keeping SAME ID)
-    streamCache.set(item.id, { liveId, ...preview });
-    saveCache();
-
-    // Send rotation report
-    await tg(
-      `🔄 <b>STREAM KEY ROTATED</b>\n\n` +
-        `<b>${item.name}</b>\n` +
-        `ID: ${item.id}\n` +
-        `Old key: Removed\n` +
-        `New key: Generated\n` +
-        `DASH URL: <code>${preview.dash}</code>\n` +
-        `Status: Will start in 30 seconds`
-    );
-
-    // Start with new key after 30 seconds (NEW server delay)
-    log(
-      `⏰ ${item.name} (ID: ${item.id}) will start with new key in 30 seconds`
-    );
+    streamCache.set(item.id, { liveId, ...preview }); saveCache();
+    await tg(`🔄 <b>STREAM KEY ROTATED</b>\n<b>${item.name}</b>\nID: ${item.id}\nDASH: <code>${preview.dash}</code>\nStatus: Will start in 30s`);
     serverStates.set(item.id, "starting");
-
-    setTimeout(() => {
-      if (
-        systemState === "running" &&
-        serverStates.get(item.id) === "starting"
-      ) {
-        startFFmpeg(item);
-      }
-    }, CONFIG.newServerDelay); // 30 SECONDS for rotation (treated as new server)
+    setTimeout(() => { if (systemState === "running") startFFmpeg(item); }, CONFIG.newServerDelay);
   } catch (error) {
-    log(
-      `❌ Rotation failed for ${item.name} (ID: ${item.id}): ${error.message}`
-    );
+    log(`❌ Rotation failed for ${item.name}: ${error.message}`);
     serverStates.set(item.id, "failed");
-
-    // Try again in 5 minutes
-    setTimeout(() => {
-      if (systemState === "running") {
-        log(`🔄 Retrying rotation for ${item.name} (ID: ${item.id})`);
-        rotateStreamKey(item);
-      }
-    }, 300000);
+    setTimeout(() => { if (systemState === "running") rotateStreamKey(item); }, 300000);
   }
 }
 
-/* ================= UPTIME CALCULATION ================= */
-
-function formatUptime(uptimeMs) {
-  if (!uptimeMs || uptimeMs < 0) return "Not active";
-
-  const seconds = Math.floor((uptimeMs / 1000) % 60);
-  const minutes = Math.floor((uptimeMs / (1000 * 60)) % 60);
-  const hours = Math.floor((uptimeMs / (1000 * 60 * 60)) % 24);
-  const days = Math.floor(uptimeMs / (1000 * 60 * 60 * 24));
-
-  const parts = [];
-  if (days > 0) parts.push(`${days}d`);
-  if (hours > 0) parts.push(`${hours}h`);
-  if (minutes > 0) parts.push(`${minutes}m`);
-  if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
-
-  return parts.join(" ");
+/* ================= UPTIME ================= */
+function formatUptime(ms) {
+  if (!ms || ms < 0) return "Not active";
+  const s = Math.floor(ms / 1000 % 60), m = Math.floor(ms / 60000 % 60), h = Math.floor(ms / 3600000 % 24), d = Math.floor(ms / 86400000);
+  const parts = []; if (d) parts.push(d + "d"); if (h) parts.push(h + "h"); if (m) parts.push(m + "m"); if (s || parts.length === 0) parts.push(s + "s"); return parts.join(" ");
 }
 
 /* ================= SERVER INFO ================= */
-
 function getServerInfo() {
-  const serverInfo = {
+  return {
     hostname: os.hostname(),
     platform: process.platform,
     arch: process.arch,
     nodeVersion: process.version,
     uptime: formatUptime(process.uptime() * 1000),
-    memory: {
-      used: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`,
-      total: `${Math.round(os.totalmem() / 1024 / 1024)}MB`,
-    },
-    streams: {
-      active: activeStreams.size,
-      total: apiItems.size,
-      cached: streamCache.size,
-    },
+    memory: { used: `${Math.round(process.memoryUsage().heapUsed / 1024 / 1024)}MB`, total: `${Math.round(os.totalmem() / 1024 / 1024)}MB` },
+    streams: { active: activeStreams.size, total: apiItems.size, cached: streamCache.size },
     time: new Date().toLocaleString(),
-    initialDelay: `${CONFIG.initialDelay / 1000} seconds`,
-    newServerDelay: `${CONFIG.newServerDelay / 1000} seconds`,
-    crashedServerDelay: `${
-      CONFIG.crashedServerDelay / 1000
-    } seconds (2 minutes)`,
-    rotationInterval: `${CONFIG.rotationInterval / (1000 * 60 * 60)} hours`,
+    initialDelay: `${CONFIG.initialDelay / 1000}s`,
+    newServerDelay: `${CONFIG.newServerDelay / 1000}s`,
+    crashedServerDelay: `${CONFIG.crashedServerDelay / 1000}s`,
+    rotationInterval: `${CONFIG.rotationInterval / 3600000}h`
   };
-
-  return serverInfo;
-}
-
-/* ================= INFO REPORT ================= */
-
-async function generateInfoReport() {
-  const serverInfo = getServerInfo();
-  const now = new Date();
-
-  let report = `📊 <b>SYSTEM STATUS REPORT</b>\n`;
-  report += `⏰ <i>${now.toLocaleString()}</i>\n\n`;
-
-  report += `🖥️ <b>Server Info:</b>\n`;
-  report += `• Host: ${serverInfo.hostname}\n`;
-  report += `• Platform: ${serverInfo.platform} (${serverInfo.arch})\n`;
-  report += `• Node.js: ${serverInfo.nodeVersion}\n`;
-  report += `• Server Uptime: ${serverInfo.uptime}\n`;
-  report += `• Memory: ${serverInfo.memory.used} / ${serverInfo.memory.total}\n`;
-  report += `• Initial Delay: ${serverInfo.initialDelay}\n`;
-  report += `• New Server Delay: ${serverInfo.newServerDelay}\n`;
-  report += `• Crashed Server Delay: ${serverInfo.crashedServerDelay}\n`;
-  report += `• Rotation: ${serverInfo.rotationInterval}\n\n`;
-
-  report += `📡 <b>Stream Stats:</b>\n`;
-  report += `• Active: ${serverInfo.streams.active}\n`;
-  report += `• Total: ${serverInfo.streams.total}\n`;
-  report += `• Cached: ${serverInfo.streams.cached}\n\n`;
-
-  report += `🎬 <b>Stream Status:</b>\n`;
-
-  let streamCount = 0;
-  for (const [id, cache] of streamCache) {
-    if (streamCount >= 5) {
-      report += `\n... and ${streamCache.size - 5} more streams`;
-      break;
-    }
-
-    const item = apiItems.get(id);
-    const startTime = streamStartTimes.get(id);
-    const state = serverStates.get(id);
-    const isActive = activeStreams.has(id);
-
-    if (item) {
-      report += `\n<b>${item.name}</b>\n`;
-      report += `• ID: ${id}\n`;
-      report += `• Status: ${state || "unknown"}\n`;
-      report += `• Active: ${isActive ? "🟢" : "🔴"}\n`;
-      report += `• Uptime: ${formatUptime(
-        startTime ? Date.now() - startTime : 0
-      )}\n`;
-      report += `• DASH: <code>${cache.dash}</code>\n`;
-
-      streamCount++;
-    }
-  }
-
-  if (streamCount === 0) {
-    report += `\nNo streams configured.\n`;
-  }
-
-  report += `\n🔄 <i>Last checked: ${now.toLocaleTimeString()}</i>`;
-
-  return report;
 }
 
 /* ================= API WATCHER ================= */
-
 async function fetchApiList() {
   try {
-    log(`🌐 Fetching API list from ${CONFIG.streamsApi}`);
     const r = await fetch(CONFIG.streamsApi);
     const j = await r.json();
     const map = new Map();
-
-    j.data.forEach((s) => {
-      // Clean and trim the data
-      const cleanName = s.name ? s.name.trim() : "Unnamed Stream";
-      const cleanSource = s.source ? s.source.trim() : "";
-      const cleanToken = s.token ? s.token.trim() : "";
-
-      // Generate stable ID based on cleaned name and source
-      const streamId = generateStreamId(cleanName, cleanSource);
-      map.set(streamId, {
-        id: streamId,
-        name: cleanName,
-        token: cleanToken,
-        source: cleanSource,
-      });
+    j.data.forEach(s => {
+      const cleanName = s.name?.trim() || "Unnamed Stream";
+      const cleanSource = s.source?.trim() || "";
+      const cleanToken = s.token?.trim() || "";
+      map.set(generateStreamId(cleanName, cleanSource), { id: generateStreamId(cleanName, cleanSource), name: cleanName, token: cleanToken, source: cleanSource });
     });
-
-    log(`✅ Fetched ${map.size} items from API`);
     return map;
-  } catch (error) {
-    log(`❌ Error fetching API list: ${error.message}`);
-    return apiItems; // Return current list on error
-  }
+  } catch { return apiItems; }
 }
 
 async function watcher() {
   try {
     const newList = await fetchApiList();
-
-    /* ➕ NEW ITEMS */
     for (const [id, item] of newList) {
       if (!apiItems.has(id)) {
-        log(`➕ NEW SERVER DETECTED: ${item.name} (ID: ${id})`);
-        try {
-          const liveId = await createLive(item.token, item.name);
-          const preview = await getStreamAndDash(liveId, item.token);
-          streamCache.set(id, { liveId, ...preview });
-          saveCache();
-
-          // Wait 30 SECONDS before starting NEW servers
-          log(
-            `⏰ New server ${item.name} (ID: ${id}) will start in 30 seconds`
-          );
-          serverStates.set(id, "starting");
-
-          setTimeout(() => {
-            if (
-              systemState === "running" &&
-              serverStates.get(id) === "starting"
-            ) {
-              log(`▶ Starting NEW server: ${item.name} (ID: ${id})`);
-              startFFmpeg(item);
-            }
-          }, CONFIG.newServerDelay); // 30 SECONDS for NEW servers
-        } catch (error) {
-          log(
-            `❌ Error creating live for ${item.name} (ID: ${id}): ${error.message}`
-          );
-        }
+        const liveId = await createLive(item.token, item.name);
+        const preview = await getStreamAndDash(liveId, item.token);
+        streamCache.set(id, { liveId, ...preview }); saveCache();
+        serverStates.set(id, "starting");
+        setTimeout(() => startFFmpeg(item), CONFIG.newServerDelay);
       }
     }
-
-    /* ❌ REMOVED ITEMS */
-    for (const [id, oldItem] of apiItems) {
-      if (!newList.has(id)) {
-        log(`❌ REMOVED ITEM: ${oldItem.name} (ID: ${id})`);
-
-        // Clear all timers
-        if (restartTimers.has(id)) {
-          clearTimeout(restartTimers.get(id));
-          restartTimers.delete(id);
-        }
-        if (streamRotationTimers.has(id)) {
-          clearTimeout(streamRotationTimers.get(id));
-          streamRotationTimers.delete(id);
-        }
-
-        stopFFmpeg(id, true);
-        streamCache.delete(id);
-        streamStartTimes.delete(id);
-        serverStates.delete(id);
-        saveCache();
-      }
-    }
-
+    for (const [id, oldItem] of apiItems) if (!newList.has(id)) { stopFFmpeg(id,true); streamCache.delete(id); saveCache(); serverStates.delete(id); }
     apiItems = newList;
-  } catch (error) {
-    log(`❌ Watcher error: ${error.message}`);
-  }
+  } catch {}
 }
 
-/* ================= TELEGRAM BOT COMMANDS ================= */
-
+/* ================= TELEGRAM BOT ================= */
 let lastCommandTime = new Map();
-
 async function handleTelegramCommand(update) {
-  try {
-    const message = update.message;
-    if (!message || !message.text) return;
-
-    const chatId = message.chat.id;
-    const userId = message.from.id;
-    const command = message.text.trim();
-    const now = Date.now();
-
-    // Rate limiting: 1 command per 5 seconds per user
-    if (lastCommandTime.has(userId)) {
-      const lastTime = lastCommandTime.get(userId);
-      if (now - lastTime < 5000) {
-        await tg("⏳ Please wait 5 seconds between commands.", chatId);
-        return;
-      }
-    }
-    lastCommandTime.set(userId, now);
-
-    // Clean old entries
-    if (lastCommandTime.size > 100) {
-      const oldest = Array.from(lastCommandTime.entries())
-        .sort((a, b) => a[1] - b[1])
-        .slice(0, 20);
-      oldest.forEach(([uid]) => lastCommandTime.delete(uid));
-    }
-
-    // Handle /info command
-    if (command === "/info" || command.startsWith("/info")) {
-      const report = await generateInfoReport();
-      await tg(report, chatId);
-      return;
-    }
-
-    // Handle /status command (short version)
-    if (command === "/status" || command.startsWith("/status")) {
-      const status =
-        `📊 <b>Stream Manager Status</b>\n\n` +
-        `🟢 Active Streams: ${activeStreams.size}\n` +
-        `📋 Total Items: ${apiItems.size}\n` +
-        `⏰ Server Uptime: ${formatUptime(process.uptime() * 1000)}\n` +
-        `🆕 New Server Delay: ${CONFIG.newServerDelay / 1000}s\n` +
-        `🔧 Crashed Server Delay: ${CONFIG.crashedServerDelay / 1000}s\n` +
-        `⏳ Rotation: ${CONFIG.rotationInterval / (1000 * 60 * 60)}h\n` +
-        `🕒 Time: ${new Date().toLocaleString()}\n\n` +
-        `Use /info for detailed report`;
-      await tg(status, chatId);
-      return;
-    }
-
-    // Handle /help command
-    if (command === "/help" || command.startsWith("/help")) {
-      const helpText =
-        `🤖 <b>Stream Manager Bot Commands</b>\n\n` +
-        `/info - Get detailed system and stream report\n` +
-        `/status - Quick status check\n` +
-        `/help - Show this help message\n\n` +
-        `<i>Auto-monitoring ${CONFIG.pollInterval / 1000}s intervals</i>\n` +
-        `<i>New server delay: ${CONFIG.newServerDelay / 1000}s</i>\n` +
-        `<i>Crashed server delay: ${CONFIG.crashedServerDelay / 1000}s</i>\n` +
-        `<i>Rotation interval: ${
-          CONFIG.rotationInterval / (1000 * 60 * 60)
-        }h</i>`;
-      await tg(helpText, chatId);
-    }
-  } catch (error) {
-    console.error("Command handler error:", error);
-  }
+  const message = update.message;
+  if (!message?.text) return;
+  const chatId = message.chat.id;
+  const userId = message.from.id;
+  const command = message.text.trim();
+  const now = Date.now();
+  if (lastCommandTime.has(userId) && now - lastCommandTime.get(userId) < 5000) { await tg("⏳ Wait 5 seconds", chatId); return; }
+  lastCommandTime.set(userId, now);
+  if (command.startsWith("/info")) { await tg(await generateInfoReport(), chatId); return; }
+  if (command.startsWith("/status")) { await tg(`📊 Active: ${activeStreams.size}\nTotal: ${apiItems.size}`, chatId); return; }
+  if (command.startsWith("/help")) { await tg(`🤖 /info /status /help`, chatId); return; }
 }
 
-// Poll Telegram for updates
 async function telegramBotPolling() {
   let offset = 0;
-
   while (systemState === "running") {
     try {
-      const response = await fetch(
-        `https://api.telegram.org/bot${CONFIG.telegram.botToken}/getUpdates?offset=${offset}&timeout=30`
-      );
-
+      const response = await fetch(`https://api.telegram.org/bot${CONFIG.telegram.botToken}/getUpdates?offset=${offset}&timeout=30`);
       const data = await response.json();
-
-      if (data.ok && data.result.length > 0) {
-        for (const update of data.result) {
-          offset = update.update_id + 1;
-          await handleTelegramCommand(update);
-        }
-      }
-    } catch (error) {
-      console.error("Telegram polling error:", error);
-      await new Promise((r) => setTimeout(r, 5000));
-    }
-
-    await new Promise((r) => setTimeout(r, 1000));
+      if (data.ok && data.result.length > 0) for (const update of data.result) { offset = update.update_id + 1; await handleTelegramCommand(update); }
+    } catch { await new Promise(r => setTimeout(r, 5000)); }
+    await new Promise(r => setTimeout(r, 1000));
   }
 }
 
 /* ================= FINAL CHECK ================= */
-
 async function finalCheckReport() {
-  if (activeStreams.size === 0) {
-    await tg(
-      "⚠️ <b>No active streams detected</b>\nSystem is running but no streams are active."
-    );
-    return;
+  if (activeStreams.size === 0) await tg("⚠️ No active streams detected");
+  else {
+    const lines = [];
+    streamCache.forEach((v,id) => { const item=apiItems.get(id); const state=serverStates.get(id); const start=streamStartTimes.get(id); lines.push(`<b>${item?.name||id}</b>\nID:${id}\nStatus:${state||"unknown"}\nDASH:<code>${v.dash}</code>\nUptime:${formatUptime(start?Date.now()-start:0)}`); });
+    await tg(`📡 <b>DASH REPORT</b>\n\n${lines.join("\n\n")}`);
   }
-
-  const lines = [];
-  streamCache.forEach((v, id) => {
-    const item = apiItems.get(id);
-    const startTime = streamStartTimes.get(id);
-    const state = serverStates.get(id);
-    lines.push(
-      `<b>${item ? item.name : id}</b>\n` +
-        `ID: ${id}\n` +
-        `Status: ${state || "unknown"}\n` +
-        `DASH: <code>${v.dash}</code>\n` +
-        `Uptime: ${formatUptime(startTime ? Date.now() - startTime : 0)}`
-    );
-  });
-
-  await tg(`📡 <b>DASH REPORT</b>\n\n${lines.join("\n\n")}`);
 }
 
 /* ================= BOOT ================= */
-
 async function boot() {
   log("🚀 Booting Stream Manager...");
-
-  try {
-    loadCache();
-    apiItems = await fetchApiList();
-
-    log(`📋 Loaded ${apiItems.size} items from API`);
-
-    // Send startup notification
-    const delaySeconds = CONFIG.initialDelay / 1000;
-    await tg(
-      `🚀 <b>Stream Manager Started</b>\n\n` +
-        `Total items: ${apiItems.size}\n` +
-        `Cached streams: ${streamCache.size}\n` +
-        `⏳ All streams will start in ${delaySeconds} seconds\n` +
-        `🆕 New server delay: ${CONFIG.newServerDelay / 1000}s\n` +
-        `🔧 Crashed server delay: ${CONFIG.crashedServerDelay / 1000}s\n` +
-        `🔄 Auto-rotation: ${
-          CONFIG.rotationInterval / (1000 * 60 * 60)
-        } hours\n` +
-        `Bot commands: /info /status /help`
-    );
-
-    // Create Facebook Live for any missing items
-    for (const item of apiItems.values()) {
-      if (!streamCache.has(item.id)) {
-        log(`🆕 Creating new live for ${item.name} (ID: ${item.id})`);
-        try {
-          const liveId = await createLive(item.token, item.name);
-          const preview = await getStreamAndDash(liveId, item.token);
-          streamCache.set(item.id, { liveId, ...preview });
-          saveCache();
-        } catch (error) {
-          log(
-            `❌ Failed to create live for ${item.name} (ID: ${item.id}): ${error.message}`
-          );
-        }
-      }
-    }
-
-    // ⭐ Wait 1:50 minutes before starting ALL servers
-    log(`⏳ Waiting ${delaySeconds} seconds before starting all servers...`);
-
-    startupTimer = setTimeout(() => {
-      log(`▶ Starting ALL servers after ${delaySeconds} second delay`);
-
-      // Start all servers after the delay
-      for (const item of apiItems.values()) {
-        startFFmpeg(item);
-      }
-
-      log(`✅ Started ${apiItems.size} servers`);
-
-      // Start watcher after servers are running
-      setInterval(watcher, CONFIG.pollInterval);
-      log(`🔍 Watcher started with ${CONFIG.pollInterval / 1000}s intervals`);
-
-      // Send final report
-      setTimeout(finalCheckReport, 300000); // 5 minutes after servers start
-      log(`📊 Final report scheduled in 5 minutes`);
-    }, CONFIG.initialDelay);
-
-    // Start Telegram bot polling immediately
-    telegramBotPolling();
-    log(`🤖 Telegram bot polling started`);
-  } catch (error) {
-    log(`❌ Boot failed: ${error.message}`);
-    await tg(`❌ <b>Stream Manager Boot Failed</b>\n${error.message}`);
-    process.exit(1);
-  }
+  loadCache();
+  apiItems = await fetchApiList();
+  await tg(`🚀 <b>Stream Manager Started</b>\nTotal items: ${apiItems.size}\nCached streams: ${streamCache.size}`);
+  for (const item of apiItems.values()) if (!streamCache.has(item.id)) { const liveId = await createLive(item.token,item.name); const preview=await getStreamAndDash(liveId,item.token); streamCache.set(item.id,{liveId,...preview}); saveCache(); }
+  startupTimer=setTimeout(()=>{ for(const item of apiItems.values()) startFFmpeg(item); setInterval(watcher, CONFIG.pollInterval); setTimeout(finalCheckReport,300000); }, CONFIG.initialDelay);
+  telegramBotPolling();
 }
-
 boot();
 
 /* ================= SHUTDOWN ================= */
-
 async function gracefulShutdown() {
-  systemState = "stopping";
-  log("🛑 Shutting down gracefully...");
-
-  // Clear the startup timer if it exists
-  if (startupTimer) {
-    clearTimeout(startupTimer);
-  }
-
-  await tg(
-    "🛑 <b>Stream Manager Shutting Down</b>\n" +
-      `Stopping ${activeStreams.size} active streams\n` +
-      `Cleaning up all timers`
-  );
-
-  // Clear all timers
-  restartTimers.forEach((timer, id) => {
-    clearTimeout(timer);
-  });
-  streamRotationTimers.forEach((timer, id) => {
-    clearTimeout(timer);
-  });
-
-  // Stop all streams
-  for (const [id] of activeStreams) {
-    stopFFmpeg(id, true);
-  }
-
-  // Wait a bit for processes to terminate
-  await new Promise((r) => setTimeout(r, 2000));
-
-  log("👋 Shutdown complete");
+  systemState="stopping";
+  if (startupTimer) clearTimeout(startupTimer);
+  for(const [id] of activeStreams) stopFFmpeg(id,true);
+  restartTimers.forEach(t=>clearTimeout(t));
+  streamRotationTimers.forEach(t=>clearTimeout(t));
+  await new Promise(r=>setTimeout(r,2000));
   process.exit(0);
 }
-
 process.on("SIGINT", gracefulShutdown);
 process.on("SIGTERM", gracefulShutdown);
