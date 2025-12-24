@@ -147,7 +147,7 @@ async function getStreamAndDash(liveId, token) {
 
 /* ================= FFMPEG ================= */
 
-function startFFmpeg(item) {
+function startFFmpeg(item, force = false) {
   const cache = streamCache.get(item.id);
   if (!cache) {
     log(`❌ No cache for ${item.name}, cannot start`);
@@ -155,10 +155,8 @@ function startFFmpeg(item) {
   }
 
   // Check if already starting or restarting
-  if (
-    serverStates.get(item.id) === "starting" ||
-    serverStates.get(item.id) === "restarting"
-  ) {
+  const state = serverStates.get(item.id);
+  if (!force && (state === "starting" || state === "restarting")) {
     log(`⚠️ ${item.name} is already starting/restarting, skipping`);
     return;
   }
@@ -172,69 +170,74 @@ function startFFmpeg(item) {
     restartTimers.delete(item.id);
   }
 
- const cmd = ffmpeg(item.source)
-   .inputOptions([
-     "-hide_banner",
-     "-loglevel",
-     "error",
-     "-re",
-     // --- CRITICAL RECONNECT STRATEGY ---
-     "-reconnect",
-     "1",
-     "-reconnect_at_eof",
-     "1",
-     "-reconnect_streamed",
-     "1",
-     "-reconnect_delay_max",
-     "5", // Try reconnecting for up to 5 seconds
-     "-fflags",
-     "+genpts+igndts", // Ignore timestamp errors from the M3U
-     // ----------------------------------
-   ])
-   .outputOptions([
-     "-preset",
-     "veryfast",
-     "-tune",
-     "zerolatency",
-     "-b:v",
-     "2500k",
-     "-g",
-     "60",
-     "-r",
-     "30",
-     "-bufsize",
-     "5000k",
-     "-pix_fmt",
-     "yuv420p",
-     "-f",
-     "flv",
-     // --- FLV STABILITY ---
-     "-flvflags",
-     "no_duration_filesize",
-     "-rtmp_live",
-     "live", // Specify it is a live stream
-   ])
-   .output(cache.stream_url)
-   .on("start", (commandLine) => {
-     log(`✅ FFmpeg started for ${item.name}`);
-     streamStartTimes.set(item.id, Date.now());
-     serverStates.set(item.id, "running");
+  const cmd = ffmpeg(item.source)
+    .inputOptions([
+      "-re",
+      "-hide_banner",
+      "-loglevel",
+      "error",
+      "-reconnect",
+      "1",
+      "-reconnect_at_eof",
+      "1",
+      "-reconnect_streamed",
+      "1",
+      "-reconnect_delay_max",
+      "5",
+      "-fflags",
+      "+genpts+igndts",
+    ])
+    .videoCodec("libx264")
+    .audioCodec("aac")
+    .audioChannels(1)
+    .audioFrequency(44100)
+    .audioBitrate("96k")
+    .outputOptions([
+      "-preset",
+      "veryfast",
+      "-tune",
+      "zerolatency",
+      "-b:v",
+      "2500k",
+      "-maxrate",
+      "2500k",
+      "-bufsize",
+      "5000k",
+      "-g",
+      "60",
+      "-r",
+      "30",
+      "-pix_fmt",
+      "yuv420p",
+      "-f",
+      "flv",
+      "-flvflags",
+      "no_duration_filesize",
+      "-rtmp_live",
+      "live",
+    ])
+    .output(cache.stream_url)
+    .on("start", (commandLine) => {
+      log(`✅ FFmpeg started for ${item.name}`);
+      streamStartTimes.set(item.id, Date.now());
+      serverStates.set(item.id, "running");
 
-     // Start rotation timer (3:45 hours) - ONLY THIS REMAINS
-     startRotationTimer(item);
-   })
-   .on("error", (err, stdout, stderr) => {
-     log(`❌ FFmpeg error for ${item.name}: ${err.message}`);
-     handleStreamCrash(item, err.message);
-   })
-   .on("end", () => {
-     log(`🔚 FFmpeg ended for ${item.name}`);
-     handleStreamCrash(item, "Stream ended unexpectedly");
-   });
+      // Start rotation timer (3:45 hours)
+      startRotationTimer(item);
+    })
+    .on("error", (err) => {
+      log(`❌ FFmpeg error for ${item.name}: ${err.message}`);
+      handleStreamCrash(item, err.message);
+    })
+    .on("end", () => {
+      log(`🔚 FFmpeg ended for ${item.name}`);
+      handleStreamCrash(item, "Stream ended unexpectedly");
+    });
 
   activeStreams.set(item.id, cmd);
   cmd.run();
 }
+
 
 function handleStreamCrash(item, reason) {
   const state = serverStates.get(item.id);
