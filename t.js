@@ -10,6 +10,7 @@
  * - 2 minute delay for CRASHED servers
  * - 3:45 hour stream key rotation (NO quality checks)
  * - Server shutdown reports
+ * - Stable stream IDs
  ******************************************************************/
 
 import fs from "fs";
@@ -145,6 +146,20 @@ async function getStreamAndDash(liveId, token) {
   throw new Error("Preview not ready");
 }
 
+/* ================= STABLE STREAM ID GENERATION ================= */
+
+function generateStreamId(name, source) {
+  // Create a stable hash from name and source
+  const str = `${name}|${source}`;
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return `stream_${Math.abs(hash).toString(16).substring(0, 8)}`;
+}
+
 /* ================= FFMPEG ================= */
 
 function startFFmpeg(item) {
@@ -163,7 +178,7 @@ function startFFmpeg(item) {
     return;
   }
 
-  log(`▶ STARTING ${item.name}`);
+  log(`▶ STARTING ${item.name} (ID: ${item.id})`);
   serverStates.set(item.id, "starting");
 
   // Clear any existing restart timer
@@ -232,19 +247,19 @@ function startFFmpeg(item) {
     ])
     .output(cache.stream_url)
     .on("start", (commandLine) => {
-      log(`✅ FFmpeg started for ${item.name}`);
+      log(`✅ FFmpeg started for ${item.name} (ID: ${item.id})`);
       streamStartTimes.set(item.id, Date.now());
       serverStates.set(item.id, "running");
 
-      // Start rotation timer (3:45 hours) - ONLY THIS REMAINS
+      // Start rotation timer (3:45 hours)
       startRotationTimer(item);
     })
     .on("error", (err, stdout, stderr) => {
-      log(`❌ FFmpeg error for ${item.name}: ${err.message}`);
+      log(`❌ FFmpeg error for ${item.name} (ID: ${item.id}): ${err.message}`);
       handleStreamCrash(item, err.message);
     })
     .on("end", () => {
-      log(`🔚 FFmpeg ended for ${item.name}`);
+      log(`🔚 FFmpeg ended for ${item.name} (ID: ${item.id})`);
       handleStreamCrash(item, "Stream ended unexpectedly");
     });
 
@@ -271,12 +286,13 @@ function handleStreamCrash(item, reason) {
   tg(
     `🔴 <b>SERVER CRASH REPORT</b>\n\n` +
       `<b>${item.name}</b>\n` +
+      `ID: ${item.id}\n` +
       `Reason: ${reason}\n` +
       `Uptime: ${uptime}\n` +
       `Status: Will restart in 2 minutes`
   );
 
-  log(`🔄 ${item.name} will restart in 2 minutes`);
+  log(`🔄 ${item.name} (ID: ${item.id}) will restart in 2 minutes`);
 
   // Schedule restart in 2 MINUTES (120 seconds) for crashed servers
   serverStates.set(item.id, "restarting");
@@ -287,7 +303,7 @@ function handleStreamCrash(item, reason) {
       systemState === "running" &&
       serverStates.get(item.id) === "restarting"
     ) {
-      log(`▶ Attempting restart ${item.name}`);
+      log(`▶ Attempting restart ${item.name} (ID: ${item.id})`);
       startFFmpeg(item);
     }
   }, CONFIG.crashedServerDelay); // 2 MINUTES for crashed servers
@@ -314,7 +330,9 @@ function stopFFmpeg(id, skipReport = false) {
             const uptime = streamStartTimes.has(id)
               ? formatUptime(Date.now() - streamStartTimes.get(id))
               : "Unknown";
-            log(`⏹️ Stopped ${item.name} (was running for ${uptime})`);
+            log(
+              `⏹️ Stopped ${item.name} (ID: ${id}) - was running for ${uptime}`
+            );
           }
         }
       }
@@ -335,10 +353,14 @@ function startRotationTimer(item) {
     clearTimeout(streamRotationTimers.get(item.id));
   }
 
-  log(`⏰ Rotation timer started for ${item.name} (3:45 hours)`);
+  log(
+    `⏰ Rotation timer started for ${item.name} (ID: ${item.id}) - 3:45 hours`
+  );
 
   const rotationTimer = setTimeout(async () => {
-    log(`🔄 Rotating stream key for ${item.name} (3:45 hours elapsed)`);
+    log(
+      `🔄 Rotating stream key for ${item.name} (ID: ${item.id}) - 3:45 hours elapsed`
+    );
     await rotateStreamKey(item);
   }, CONFIG.rotationInterval);
 
@@ -347,7 +369,7 @@ function startRotationTimer(item) {
 
 async function rotateStreamKey(item) {
   try {
-    log(`🔄 Starting key rotation for ${item.name}`);
+    log(`🔄 Starting key rotation for ${item.name} (ID: ${item.id})`);
     serverStates.set(item.id, "rotating");
 
     // Stop current stream gracefully
@@ -362,7 +384,7 @@ async function rotateStreamKey(item) {
     const liveId = await createLive(item.token, item.name);
     const preview = await getStreamAndDash(liveId, item.token);
 
-    // Update cache with new stream
+    // Update cache with new stream (keeping SAME ID)
     streamCache.set(item.id, { liveId, ...preview });
     saveCache();
 
@@ -370,6 +392,7 @@ async function rotateStreamKey(item) {
     await tg(
       `🔄 <b>STREAM KEY ROTATED</b>\n\n` +
         `<b>${item.name}</b>\n` +
+        `ID: ${item.id}\n` +
         `Old key: Removed\n` +
         `New key: Generated\n` +
         `DASH URL: <code>${preview.dash}</code>\n` +
@@ -377,7 +400,9 @@ async function rotateStreamKey(item) {
     );
 
     // Start with new key after 30 seconds (NEW server delay)
-    log(`⏰ ${item.name} will start with new key in 30 seconds`);
+    log(
+      `⏰ ${item.name} (ID: ${item.id}) will start with new key in 30 seconds`
+    );
     serverStates.set(item.id, "starting");
 
     setTimeout(() => {
@@ -389,13 +414,15 @@ async function rotateStreamKey(item) {
       }
     }, CONFIG.newServerDelay); // 30 SECONDS for rotation (treated as new server)
   } catch (error) {
-    log(`❌ Rotation failed for ${item.name}: ${error.message}`);
+    log(
+      `❌ Rotation failed for ${item.name} (ID: ${item.id}): ${error.message}`
+    );
     serverStates.set(item.id, "failed");
 
     // Try again in 5 minutes
     setTimeout(() => {
       if (systemState === "running") {
-        log(`🔄 Retrying rotation for ${item.name}`);
+        log(`🔄 Retrying rotation for ${item.name} (ID: ${item.id})`);
         rotateStreamKey(item);
       }
     }, 300000);
@@ -492,6 +519,7 @@ async function generateInfoReport() {
 
     if (item) {
       report += `\n<b>${item.name}</b>\n`;
+      report += `• ID: ${id}\n`;
       report += `• Status: ${state || "unknown"}\n`;
       report += `• Active: ${isActive ? "🟢" : "🔴"}\n`;
       report += `• Uptime: ${formatUptime(
@@ -516,17 +544,23 @@ async function generateInfoReport() {
 
 async function fetchApiList() {
   try {
+    log(`🌐 Fetching API list from ${CONFIG.streamsApi}`);
     const r = await fetch(CONFIG.streamsApi);
     const j = await r.json();
     const map = new Map();
-    j.data.forEach((s, i) => {
-      map.set(`item_${i}`, {
-        id: `item_${i}`,
+
+    j.data.forEach((s) => {
+      // Generate stable ID based on name and source
+      const streamId = generateStreamId(s.name, s.source);
+      map.set(streamId, {
+        id: streamId,
         name: s.name,
         token: s.token,
         source: s.source,
       });
     });
+
+    log(`✅ Fetched ${map.size} items from API`);
     return map;
   } catch (error) {
     log(`❌ Error fetching API list: ${error.message}`);
@@ -541,7 +575,7 @@ async function watcher() {
     /* ➕ NEW ITEMS */
     for (const [id, item] of newList) {
       if (!apiItems.has(id)) {
-        log(`➕ NEW SERVER DETECTED ${item.name}`);
+        log(`➕ NEW SERVER DETECTED: ${item.name} (ID: ${id})`);
         try {
           const liveId = await createLive(item.token, item.name);
           const preview = await getStreamAndDash(liveId, item.token);
@@ -549,7 +583,9 @@ async function watcher() {
           saveCache();
 
           // Wait 30 SECONDS before starting NEW servers
-          log(`⏰ New server ${item.name} will start in 30 seconds`);
+          log(
+            `⏰ New server ${item.name} (ID: ${id}) will start in 30 seconds`
+          );
           serverStates.set(id, "starting");
 
           setTimeout(() => {
@@ -557,20 +593,22 @@ async function watcher() {
               systemState === "running" &&
               serverStates.get(id) === "starting"
             ) {
-              log(`▶ Starting NEW server: ${item.name}`);
+              log(`▶ Starting NEW server: ${item.name} (ID: ${id})`);
               startFFmpeg(item);
             }
           }, CONFIG.newServerDelay); // 30 SECONDS for NEW servers
         } catch (error) {
-          log(`❌ Error creating live for ${item.name}: ${error.message}`);
+          log(
+            `❌ Error creating live for ${item.name} (ID: ${id}): ${error.message}`
+          );
         }
       }
     }
 
     /* ❌ REMOVED ITEMS */
-    for (const [id] of apiItems) {
+    for (const [id, oldItem] of apiItems) {
       if (!newList.has(id)) {
-        log(`❌ REMOVED ITEM ${id}`);
+        log(`❌ REMOVED ITEM: ${oldItem.name} (ID: ${id})`);
 
         // Clear all timers
         if (restartTimers.has(id)) {
@@ -715,6 +753,7 @@ async function finalCheckReport() {
     const state = serverStates.get(id);
     lines.push(
       `<b>${item ? item.name : id}</b>\n` +
+        `ID: ${id}\n` +
         `Status: ${state || "unknown"}\n` +
         `DASH: <code>${v.dash}</code>\n` +
         `Uptime: ${formatUptime(startTime ? Date.now() - startTime : 0)}`
@@ -754,14 +793,16 @@ async function boot() {
     // Create Facebook Live for any missing items
     for (const item of apiItems.values()) {
       if (!streamCache.has(item.id)) {
-        log(`🆕 Creating new live for ${item.name}`);
+        log(`🆕 Creating new live for ${item.name} (ID: ${item.id})`);
         try {
           const liveId = await createLive(item.token, item.name);
           const preview = await getStreamAndDash(liveId, item.token);
           streamCache.set(item.id, { liveId, ...preview });
           saveCache();
         } catch (error) {
-          log(`❌ Failed to create live for ${item.name}: ${error.message}`);
+          log(
+            `❌ Failed to create live for ${item.name} (ID: ${item.id}): ${error.message}`
+          );
         }
       }
     }
