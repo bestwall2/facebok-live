@@ -1,14 +1,14 @@
 /******************************************************************
  * FACEBOOK MULTI STREAM MANAGER – ADVANCED
  * - dynamic list watcher
- * - cache stream_url
+ * - cache stream_url with creation time
  * - auto add/remove streams
  * - final dash report
  * - Telegram bot commands
  * - 1:50 minute initial delay for ALL servers
  * - 30 second delay for NEW servers
  * - 2 minute delay for CRASHED servers
- * - 3:45 hour stream key rotation (NO quality checks)
+ * - 3:45 hour stream key rotation (based on creation time)
  * - Server shutdown reports
  ******************************************************************/
 
@@ -40,7 +40,7 @@ const CACHE_FILE = "./streams_cache.json";
 let systemState = "running";
 let apiItems = new Map(); // current api list
 let activeStreams = new Map(); // ffmpeg processes
-let streamCache = new Map(); // stream_url cache
+let streamCache = new Map(); // stream_url cache WITH creationTime
 let streamStartTimes = new Map(); // track stream start times
 let streamRotationTimers = new Map(); // rotation timers
 let restartTimers = new Map(); // restart timers
@@ -53,7 +53,14 @@ function loadCache() {
   if (!fs.existsSync(CACHE_FILE)) return;
   try {
     const json = JSON.parse(fs.readFileSync(CACHE_FILE, "utf8"));
-    Object.entries(json).forEach(([k, v]) => streamCache.set(k, v));
+    Object.entries(json).forEach(([k, v]) => {
+      // Ensure old cache items get creationTime if missing (for backward compatibility)
+      if (!v.creationTime) {
+        v.creationTime = Date.now() - Math.random() * 3600000; // Random recent time for old items
+        log(`⚠️ Added creationTime to old cache item ${k}`);
+      }
+      streamCache.set(k, v);
+    });
     log(`✅ Loaded ${streamCache.size} cached streams`);
   } catch (error) {
     log(`❌ Error loading cache: ${error.message}`);
@@ -146,6 +153,79 @@ async function getStreamAndDash(liveId, token) {
   throw new Error("Preview not ready");
 }
 
+// NEW: Create Facebook Live with timestamp
+async function createLiveWithTimestamp(token, name) {
+  const liveId = await createLive(token, name);
+  const preview = await getStreamAndDash(liveId, token);
+  
+  return {
+    liveId,
+    ...preview,
+    creationTime: Date.now() // Store when this stream key was created
+  };
+}
+
+/* ================= CHECK AND ROTATE OLD KEYS ================= */
+
+async function checkAndRotateOldKeys() {
+  log(`🔍 Checking for old stream keys (> ${CONFIG.rotationInterval/1000/60/60} hours)...`);
+  
+  let rotatedCount = 0;
+  const now = Date.now();
+  
+  for (const [id, cache] of streamCache) {
+    const item = apiItems.get(id);
+    if (!item) continue;
+    
+    const age = now - cache.creationTime;
+    const ageHours = age / (1000 * 60 * 60);
+    
+    if (age >= CONFIG.rotationInterval) {
+      log(`🔄 Stream key for ${item.name} is ${ageHours.toFixed(2)} hours old (needs rotation)`);
+      
+      // Check if currently streaming
+      const isStreaming = activeStreams.has(id);
+      
+      if (isStreaming) {
+        // If streaming, rotate immediately
+        log(`⏰ Rotating ${item.name} immediately (currently streaming)`);
+        await rotateStreamKey(item);
+      } else {
+        // If not streaming, just update cache with new key
+        log(`⏰ Creating new key for ${item.name} (not currently streaming)`);
+        try {
+          const newCache = await createLiveWithTimestamp(item.token, item.name);
+          streamCache.set(id, newCache);
+          saveCache();
+          
+          log(`✅ Created new stream key for ${item.name}`);
+          
+          // Send Telegram notification
+          await tg(
+            `🔄 <b>AUTO-KEY ROTATION</b>\n\n` +
+            `<b>${item.name}</b>\n` +
+            `Old key age: ${ageHours.toFixed(2)} hours\n` +
+            `New key created and saved to cache\n` +
+            `DASH URL: <code>${newCache.dash}</code>\n` +
+            `Status: Will use new key when stream starts`
+          );
+        } catch (error) {
+          log(`❌ Failed to rotate key for ${item.name}: ${error.message}`);
+        }
+      }
+      
+      rotatedCount++;
+    } else {
+      const hoursLeft = (CONFIG.rotationInterval - age) / (1000 * 60 * 60);
+      log(`✓ ${item.name}: ${hoursLeft.toFixed(2)} hours until rotation`);
+    }
+  }
+  
+  if (rotatedCount > 0) {
+    log(`✅ Rotated ${rotatedCount} old stream keys`);
+  }
+}
+
 /* ================= FFMPEG ================= */
 
 function startFFmpeg(item, force = false) {
@@ -161,7 +241,15 @@ function startFFmpeg(item, force = false) {
     return;
   }
 
-  log(`▶ STARTING ${item.name}`);
+  // Check if key is expired before starting
+  const timeUntilRotation = CONFIG.rotationInterval - (Date.now() - cache.creationTime);
+  if (timeUntilRotation <= 0) {
+    log(`⚠️ ${item.name} has expired key (${((Date.now() - cache.creationTime)/1000/60/60).toFixed(2)} hours old), rotating before starting`);
+    rotateStreamKey(item);
+    return;
+  }
+
+  log(`▶ STARTING ${item.name} (key age: ${((Date.now() - cache.creationTime)/1000/60/60).toFixed(2)} hours)`);
   serverStates.set(item.id, "starting");
 
   // Clear any existing restart timer
@@ -222,7 +310,7 @@ function startFFmpeg(item, force = false) {
       streamStartTimes.set(item.id, Date.now());
       serverStates.set(item.id, "running");
 
-      // Start rotation timer (3:45 hours)
+      // Start rotation timer based on creationTime
       startRotationTimer(item);
     })
     .on("error", (err) => {
@@ -318,12 +406,27 @@ function startRotationTimer(item) {
     clearTimeout(streamRotationTimers.get(item.id));
   }
 
-  log(`⏰ Rotation timer started for ${item.name} (3:45 hours)`);
+  const cache = streamCache.get(item.id);
+  if (!cache) return;
+
+  // Calculate time until rotation based on creationTime
+  const timeUntilRotation = CONFIG.rotationInterval - (Date.now() - cache.creationTime);
+  
+  if (timeUntilRotation <= 0) {
+    // Already expired, rotate immediately
+    log(`⏰ ${item.name} key has expired, rotating now`);
+    rotateStreamKey(item);
+    return;
+  }
+
+  const minutesLeft = Math.round(timeUntilRotation / 1000 / 60);
+  const hoursLeft = (timeUntilRotation / 1000 / 60 / 60).toFixed(1);
+  log(`⏰ Rotation timer for ${item.name}: ${minutesLeft} minutes (${hoursLeft} hours) remaining`);
 
   const rotationTimer = setTimeout(async () => {
-    log(`🔄 Rotating stream key for ${item.name} (3:45 hours elapsed)`);
+    log(`🔄 Rotating stream key for ${item.name} (3:45 hours since creation)`);
     await rotateStreamKey(item);
-  }, CONFIG.rotationInterval);
+  }, timeUntilRotation);
 
   streamRotationTimers.set(item.id, rotationTimer);
 }
@@ -336,26 +439,23 @@ async function rotateStreamKey(item) {
     // Stop current stream gracefully
     stopFFmpeg(item.id, true);
 
-    // Remove old cache
-    streamCache.delete(item.id);
-    saveCache();
-
-    // Create new live stream
+    // Create new live stream with timestamp
     log(`🌐 Creating new live stream for ${item.name}`);
-    const liveId = await createLive(item.token, item.name);
-    const preview = await getStreamAndDash(liveId, item.token);
+    const newCache = await createLiveWithTimestamp(item.token, item.name);
 
     // Update cache with new stream
-    streamCache.set(item.id, { liveId, ...preview });
+    streamCache.set(item.id, newCache);
     saveCache();
 
     // Send rotation report
+    const creationTimeFormatted = new Date(newCache.creationTime).toLocaleString();
     await tg(
       `🔄 <b>STREAM KEY ROTATED</b>\n\n` +
         `<b>${item.name}</b>\n` +
         `Old key: Removed\n` +
         `New key: Generated\n` +
-        `DASH URL: <code>${preview.dash}</code>\n` +
+        `DASH URL: <code>${newCache.dash}</code>\n` +
+        `Created at: ${creationTimeFormatted}\n` +
         `Status: Will start in 30 seconds`
     );
 
@@ -398,6 +498,15 @@ function formatUptime(uptimeMs) {
   if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
 
   return parts.join(" ");
+}
+
+// NEW: Format time since creation
+function formatTimeSinceCreation(itemId) {
+  const cache = streamCache.get(itemId);
+  if (!cache || !cache.creationTime) return "Unknown";
+  
+  const age = Date.now() - cache.creationTime;
+  return formatUptime(age);
 }
 
 /* ================= SERVER INFO ================= */
@@ -470,12 +579,17 @@ async function generateInfoReport() {
     const isActive = activeStreams.has(id);
 
     if (item) {
+      const keyAge = formatTimeSinceCreation(id);
+      const creationTime = cache.creationTime ? 
+        new Date(cache.creationTime).toLocaleTimeString() : "Unknown";
+      
       report += `\n<b>${item.name}</b>\n`;
       report += `• Status: ${state || "unknown"}\n`;
       report += `• Active: ${isActive ? "🟢" : "🔴"}\n`;
-      report += `• Uptime: ${formatUptime(
+      report += `• Stream Uptime: ${formatUptime(
         startTime ? Date.now() - startTime : 0
       )}\n`;
+      report += `• Key Age: ${keyAge} (created: ${creationTime})\n`;
       report += `• DASH: <code>${cache.dash}</code>\n`;
 
       streamCount++;
@@ -522,10 +636,12 @@ async function watcher() {
       if (!apiItems.has(id)) {
         log(`➕ NEW SERVER DETECTED ${item.name}`);
         try {
-          const liveId = await createLive(item.token, item.name);
-          const preview = await getStreamAndDash(liveId, item.token);
-          streamCache.set(id, { liveId, ...preview });
+          // Create new live stream WITH timestamp
+          const newCache = await createLiveWithTimestamp(item.token, item.name);
+          streamCache.set(id, newCache);
           saveCache();
+          
+          log(`✅ Created new stream for ${item.name} at ${new Date(newCache.creationTime).toLocaleString()}`);
 
           // Wait 30 SECONDS before starting NEW servers
           log(`⏰ New server ${item.name} will start in 30 seconds`);
@@ -552,7 +668,7 @@ async function watcher() {
           restartTimers.delete(id);
         }
         if (streamRotationTimers.has(id)) {
-          clearTimeout(streamRotationTimers.get(item.id));
+          clearTimeout(streamRotationTimers.get(id));
           streamRotationTimers.delete(id);
         }
 
@@ -687,9 +803,12 @@ async function finalCheckReport() {
     const item = apiItems.get(id);
     const startTime = streamStartTimes.get(id);
     const state = serverStates.get(id);
+    const keyAge = formatTimeSinceCreation(id);
+    
     lines.push(
       `<b>${item ? item.name : id}</b>\n` +
         `Status: ${state || "unknown"}\n` +
+        `Key Age: ${keyAge}\n` +
         `DASH: <code>${v.dash}</code>\n` +
         `Uptime: ${formatUptime(startTime ? Date.now() - startTime : 0)}`
     );
@@ -710,37 +829,42 @@ async function boot() {
     log(`📋 Loaded ${apiItems.size} items from API`);
     log(`💾 Loaded ${streamCache.size} cached streams`);
 
+    // Check for old stream keys IMMEDIATELY on startup
+    log(`🔍 Checking for old stream keys on startup...`);
+    await checkAndRotateOldKeys();
+
     // Send startup notification
     const delaySeconds = CONFIG.initialDelay / 1000;
     await tg(
       `🚀 <b>Stream Manager Started</b>\n\n` +
         `Total items: ${apiItems.size}\n` +
         `Cached streams: ${streamCache.size}\n` +
+        `Checked old keys: ✅ Done\n` +
         `⏳ All streams will start in ${delaySeconds} seconds\n` +
         `🆕 New server delay: ${CONFIG.newServerDelay / 1000}s\n` +
         `🔧 Crashed server delay: ${CONFIG.crashedServerDelay / 1000}s\n` +
         `🔄 Auto-rotation: ${
           CONFIG.rotationInterval / (1000 * 60 * 60)
-        } hours\n` +
+        } hours (based on creation time)\n` +
         `Bot commands: /info /status /help`
     );
 
-    // Create Facebook Live for any missing items
+    // Create Facebook Live for any missing items WITH timestamp
     for (const item of apiItems.values()) {
       if (!streamCache.has(item.id)) {
         log(`🆕 Creating new live for ${item.name}`);
         try {
-          const liveId = await createLive(item.token, item.name);
-          const preview = await getStreamAndDash(liveId, item.token);
-          streamCache.set(item.id, { liveId, ...preview });
+          const newCache = await createLiveWithTimestamp(item.token, item.name);
+          streamCache.set(item.id, newCache);
           saveCache();
+          log(`✅ Created at ${new Date(newCache.creationTime).toLocaleString()}`);
         } catch (error) {
           log(`❌ Failed to create live for ${item.name}: ${error.message}`);
         }
       }
     }
 
-    // ⭐ Wait 1:50 minutes before starting ALL servers
+    // ⭐ Wait before starting ALL servers
     log(`⏳ Waiting ${delaySeconds} seconds before starting all servers...`);
 
     startupTimer = setTimeout(() => {
@@ -756,6 +880,10 @@ async function boot() {
       // Start watcher after servers are running
       setInterval(watcher, CONFIG.pollInterval);
       log(`🔍 Watcher started with ${CONFIG.pollInterval / 1000}s intervals`);
+
+      // Also check for old keys periodically (every hour)
+      setInterval(checkAndRotateOldKeys, 3600000);
+      log(`🔍 Old key checker started (every hour)`);
 
       // Send final report
       setTimeout(finalCheckReport, 300000); // 5 minutes after servers start
