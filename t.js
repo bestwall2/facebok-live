@@ -91,21 +91,32 @@ class FacebookAPI {
     return { id: json.id };
   }
 
-  static async getPreview(liveId, token) {
-    const fields = "status,stream_url,secure_stream_url,dash_preview_url,permalink_url,embed_html";
-    const url = `https://graph.facebook.com/v24.0/${liveId}?fields=${fields}&access_token=${encodeURIComponent(token)}`;
-    const res = await fetch(url);
-    const json = await res.json();
-    consol.log(json);
-    if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
-    return {
-      status: json.status ?? null,
-      stream_url: json.stream_url ?? null,
-      secure_stream_url: json.secure_stream_url ?? null,
-      dash_preview_url: json.dash_preview_url ?? null,
-      permalink_url: json.permalink_url ?? null,
-      embed_html: json.embed_html ?? null
-    };
+  static async getPreview(liveId, token, retries = 10, delay = 3000) {
+    for (let i = 0; i < retries; i++) {
+      const fields = "status,stream_url,secure_stream_url,dash_preview_url,permalink_url,embed_html";
+      const url = `https://graph.facebook.com/v24.0/${liveId}?fields=${fields}&access_token=${encodeURIComponent(token)}`;
+      const res = await fetch(url);
+      const json = await res.json();
+
+      if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
+
+      if (json.stream_url || json.secure_stream_url) {
+        console.log("Preview ready:", json);
+        return {
+          status: json.status ?? null,
+          stream_url: json.stream_url ?? null,
+          secure_stream_url: json.secure_stream_url ?? null,
+          dash_preview_url: json.dash_preview_url ?? null,
+          permalink_url: json.permalink_url ?? null,
+          embed_html: json.embed_html ?? null
+        };
+      }
+
+      console.log(`Preview not ready yet, retrying in ${delay}ms...`);
+      await new Promise(r => setTimeout(r, delay));
+    }
+
+    throw new Error("Preview not available after retries");
   }
 }
 
@@ -119,12 +130,6 @@ function extractMPDFromPreview(preview) {
   return null;
 }
 
-function extractStreamKey(url) {
-  if (!url) return null;
-  const parts = url.split("/");
-  return parts[parts.length - 1] || null;
-}
-
 function escapeHtml(text) {
   if (!text) return "";
   return String(text).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
@@ -135,13 +140,14 @@ class StreamManager {
     Logger.info(`Starting stream: ${item.name}`);
     try {
       await new Promise(r => setTimeout(r, 2000));
-      const preview = await FacebookAPI.getPreview(item.streamId, item.token);
+      
+      const preview = await FacebookAPI.getPreview(item.streamId, item.token, 10, 3000);
       item.preview = preview;
-      Logger.info(`Starting stream: ${preview}`);
-      const rawUrl = preview.stream_url;
-      consol.log(preview);
-      //const streamKey = preview.stream_url;
-      if (!streamKey) throw new Error("No stream key available");
+
+      const rawUrl = preview.secure_stream_url || preview.stream_url;
+      if (!rawUrl) throw new Error("No valid stream URL from Facebook live ID");
+
+      console.log("Streaming to:", rawUrl);
       item.rtmps = rawUrl;
 
       const cmd = ffmpeg(item.source)
@@ -151,6 +157,7 @@ class StreamManager {
         .on("start", async commandLine => {
           Logger.success(`Stream started: ${item.name}`);
           fs.appendFileSync(`ffmpeg_${item.id}.cmd.txt`, commandLine + "\n");
+
           const mpd = extractMPDFromPreview(preview) || "N/A";
           const msg = `✅ <b>LIVE</b>\n<b>${escapeHtml(item.name)}</b>\nChannel: ${preview.permalink_url || "N/A"}\nDASH preview (MPD): ${mpd}\nRTMPS: ${item.rtmps}`;
           await Telegram.send(msg);
