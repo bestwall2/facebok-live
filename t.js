@@ -96,6 +96,7 @@ class FacebookAPI {
     const url = `https://graph.facebook.com/v24.0/${liveId}?fields=${fields}&access_token=${encodeURIComponent(token)}`;
     const res = await fetch(url);
     const json = await res.json();
+    consol.log(json);
     if (json.error) throw new Error(json.error.message || JSON.stringify(json.error));
     return {
       status: json.status ?? null,
