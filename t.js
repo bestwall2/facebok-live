@@ -136,15 +136,17 @@ class StreamManager {
       await new Promise(r => setTimeout(r, 2000));
       const preview = await FacebookAPI.getPreview(item.streamId, item.token);
       item.preview = preview;
-      const rawUrl = preview.secure_stream_url || preview.stream_url;
-      const streamKey = extractStreamKey(rawUrl);
+      
+      const rawUrl = preview.stream_url;
+      consol.log(rawUrl);
+      //const streamKey = preview.stream_url;
       if (!streamKey) throw new Error("No stream key available");
-      item.rtmps = `rtmps://live-api-s.facebook.com:443/rtmp/${streamKey}`;
+      item.rtmps = rawUrl;
 
       const cmd = ffmpeg(item.source)
         .inputOptions(FACEBOOK_FFMPEG_OPTIONS.input)
         .outputOptions(FACEBOOK_FFMPEG_OPTIONS.output)
-        .output(item.rtmps)
+        .output(rawUrl)
         .on("start", async commandLine => {
           Logger.success(`Stream started: ${item.name}`);
           fs.appendFileSync(`ffmpeg_${item.id}.cmd.txt`, commandLine + "\n");
