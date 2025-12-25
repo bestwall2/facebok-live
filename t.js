@@ -350,31 +350,42 @@ function startFFmpeg(item, force = false) {
     .audioFrequency(44100)
     .audioBitrate("128k")
     .outputOptions([
+      // ===== VIDEO ENCODING (FACEBOOK SAFE) =====
+      "-c:v", "libx264",
       "-preset", "veryfast",
-      "-tune", "zerolatency",
       "-profile:v", "main",
-      "-level", "4.2",
+      "-level", "4.1",
       "-pix_fmt", "yuv420p",
+    
+      // ===== FRAME TIMING =====
       "-r", "30",
       "-g", "60",
       "-keyint_min", "60",
       "-sc_threshold", "0",
-      "-crf", "23",
-      "-bufsize", "20000k",
-      "-maxrate", "6000k",
-      "-b:v", "5000k",
-      "-x264opts", "no-scenecut:rc-lookahead=0",
-      "-af", "aresample=async=1:min_hard_comp=0.100:first_pts=0",
+    
+      // ===== STRICT BITRATE CONTROL (NO CRF) =====
+      "-b:v", "4500k",
+      "-maxrate", "4500k",
+      "-bufsize", "9000k",
+    
+      // ===== X264 STABILITY =====
+      "-x264opts", "nal-hrd=cbr:force-cfr=1",
+    
+      // ===== AUDIO (FACEBOOK REQUIRED) =====
+      "-c:a", "aac",
+      "-b:a", "128k",
+      "-ac", "2",
+      "-ar", "48000",
+    
+      // ===== OUTPUT FORMAT =====
       "-f", "flv",
       "-rtmp_live", "live",
-      "-rtmp_buffer", "1700",
-      "-max_muxing_queue_size", "9999",
-      "-movflags", "+faststart",
-      "-avoid_negative_ts", "make_zero",
-      "-copytb", "1",
-      "-use_wallclock_as_timestamps", "1",
-      "-muxdelay", "1.7",
-      "-muxpreload", "1.7",
+    
+      // ===== MUXING SAFETY =====
+      "-max_muxing_queue_size", "2048",
+    
+      // ===== REMOVE TIMING TRAPS =====
+      "-fflags", "+genpts"
     ])
     .output(cache.stream_url)
     .on("start", (commandLine) => {
