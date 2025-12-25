@@ -12,6 +12,7 @@
  * - Server shutdown reports
  * - /restart command
  * - Token error reporting
+ * - Enhanced buffering
  ******************************************************************/
 
 import fs from "fs";
@@ -49,6 +50,7 @@ let restartTimers = new Map(); // restart timers
 let serverStates = new Map(); // server states: 'starting', 'running', 'restarting', 'rotating', 'token_error'
 let startupTimer = null; // for initial startup delay
 let isRestarting = false; // flag to prevent multiple restarts
+let telegramPollingActive = true; // control telegram polling
 
 /* ================= CACHE ================= */
 
@@ -86,28 +88,42 @@ const log = (m) => console.log(`[${new Date().toISOString()}] ${m}`);
 
 /* ================= TELEGRAM ================= */
 
-async function tg(msg, chatId = CONFIG.telegram.chatId) {
-  try {
-    const response = await fetch(
-      `https://api.telegram.org/bot${CONFIG.telegram.botToken}/sendMessage`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          chat_id: chatId,
-          text: msg,
-          parse_mode: "HTML",
-          disable_web_page_preview: true,
-        }),
-      }
-    );
+async function tg(msg, chatId = CONFIG.telegram.chatId, retries = 3) {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 10000); // 10 second timeout
 
-    const result = await response.json();
-    if (!result.ok) {
-      log(`❌ Telegram error: ${result.description}`);
+      const response = await fetch(
+        `https://api.telegram.org/bot${CONFIG.telegram.botToken}/sendMessage`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            chat_id: chatId,
+            text: msg,
+            parse_mode: "HTML",
+            disable_web_page_preview: true,
+          }),
+          signal: controller.signal
+        }
+      );
+
+      clearTimeout(timeout);
+
+      const result = await response.json();
+      if (!result.ok) {
+        log(`❌ Telegram error: ${result.description}`);
+      }
+      return; // Success, exit function
+    } catch (error) {
+      if (attempt === retries) {
+        log(`❌ Telegram send error after ${retries} attempts: ${error.message}`);
+      } else {
+        log(`⚠️ Telegram attempt ${attempt} failed: ${error.message}, retrying...`);
+        await new Promise(r => setTimeout(r, 2000 * attempt)); // Exponential backoff
+      }
     }
-  } catch (error) {
-    log(`❌ Telegram send error: ${error.message}`);
   }
 }
 
@@ -138,20 +154,26 @@ async function getStreamAndDash(liveId, token) {
   log(`🌐 Getting stream URL for Live ID: ${liveId}`);
   const fields = "stream_url,dash_preview_url,status";
   for (let i = 0; i < 6; i++) {
-    const r = await fetch(
-      `https://graph.facebook.com/v24.0/${liveId}?fields=${fields}&access_token=${token}`
-    );
-    const j = await r.json();
-    if (j.stream_url) {
-      log(`✅ Stream URL ready for ${liveId}`);
-      return {
-        stream_url: j.stream_url,
-        dash: j.dash_preview_url || "N/A",
-        status: j.status || "UNKNOWN",
-      };
+    try {
+      const r = await fetch(
+        `https://graph.facebook.com/v24.0/${liveId}?fields=${fields}&access_token=${token}`
+      );
+      const j = await r.json();
+      if (j.stream_url) {
+        log(`✅ Stream URL ready for ${liveId}`);
+        return {
+          stream_url: j.stream_url,
+          dash: j.dash_preview_url || "N/A",
+          status: j.status || "UNKNOWN",
+        };
+      }
+      log(`⏳ Waiting for stream URL (attempt ${i + 1}/6)...`);
+      await new Promise((r) => setTimeout(r, 2000));
+    } catch (error) {
+      log(`⚠️ Stream URL attempt ${i + 1} failed: ${error.message}`);
+      if (i === 5) throw error;
+      await new Promise((r) => setTimeout(r, 2000));
     }
-    log(`⏳ Waiting for stream URL (attempt ${i + 1}/6)...`);
-    await new Promise((r) => setTimeout(r, 2000));
   }
   throw new Error("Preview not ready");
 }
@@ -259,7 +281,7 @@ async function checkAndRotateOldKeys() {
   }
 }
 
-/* ================= FFMPEG ================= */
+/* ================= FFMPEG WITH ENHANCED BUFFERING ================= */
 
 function startFFmpeg(item, force = false) {
   const cache = streamCache.get(item.id);
@@ -340,8 +362,7 @@ function startFFmpeg(item, force = false) {
     ])
     .output(cache.stream_url)
     .on("start", (commandLine) => {
-      log(`✅ FFmpeg started for ${item.name} with buffering`);
-      log(`📊 FFmpeg command: ${commandLine}`);
+      log(`✅ FFmpeg started for ${item.name} with enhanced buffering`);
       streamStartTimes.set(item.id, Date.now());
       serverStates.set(item.id, "running");
 
@@ -358,9 +379,11 @@ function startFFmpeg(item, force = false) {
     })
     .on("stderr", (stderrLine) => {
       // Monitor FFmpeg warnings and info
-      if (stderrLine.includes("buffer") || stderrLine.includes("queue") || 
-          stderrLine.includes("speed") || stderrLine.includes("bitrate")) {
-        log(`📊 ${item.name} FFmpeg: ${stderrLine.trim()}`);
+      const line = stderrLine.trim();
+      if (line.includes("buffer") || line.includes("queue") || 
+          line.includes("speed") || line.includes("bitrate") ||
+          line.includes("muxing") || line.includes("delay")) {
+        log(`📊 ${item.name} FFmpeg: ${line}`);
       }
     });
 
@@ -707,8 +730,16 @@ async function generateInfoReport() {
 
 async function fetchApiList() {
   try {
-    const r = await fetch(CONFIG.streamsApi);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10000);
+    
+    const r = await fetch(CONFIG.streamsApi, {
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeout);
     const j = await r.json();
+    
     const map = new Map();
     j.data.forEach((s, i) => {
       map.set(`item_${i}`, {
@@ -874,11 +905,14 @@ async function handleTelegramCommand(update) {
   }
 }
 
-// Poll Telegram for updates
+/* ================= IMPROVED TELEGRAM POLLING ================= */
+
 async function telegramBotPolling() {
   let offset = 0;
+  let errorCount = 0;
+  const maxErrors = 10;
 
-  while (systemState === "running") {
+  while (systemState === "running" && telegramPollingActive) {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 35000); // abort after 35s
@@ -893,20 +927,37 @@ async function telegramBotPolling() {
       const data = await response.json();
 
       if (data.ok && data.result.length > 0) {
+        errorCount = 0; // Reset error count on success
         for (const update of data.result) {
           offset = update.update_id + 1;
           await handleTelegramCommand(update);
         }
+      } else if (!data.ok) {
+        log(`⚠️ Telegram API error: ${data.description}`);
+        errorCount++;
       }
     } catch (error) {
+      errorCount++;
+      
       if (error.name === "AbortError") {
-        console.log("⏱️ Telegram polling timeout, retrying...");
+        log("⏱️ Telegram polling timeout, retrying...");
       } else {
-        console.error("Telegram polling error:", error);
+        log(`⚠️ Telegram polling error (${errorCount}/${maxErrors}): ${error.message}`);
       }
-      await new Promise((r) => setTimeout(r, 5000));
+
+      // If too many errors, wait longer
+      const waitTime = errorCount > 5 ? 30000 : 5000;
+      await new Promise((r) => setTimeout(r, waitTime));
+
+      // If persistent errors, try to restart polling
+      if (errorCount >= maxErrors) {
+        log("⚠️ Too many Telegram errors, restarting polling...");
+        errorCount = 0;
+        await new Promise((r) => setTimeout(r, 60000)); // Wait 1 minute
+      }
     }
 
+    // Small delay between polls even on success
     await new Promise((r) => setTimeout(r, 1000));
   }
 }
@@ -1042,6 +1093,7 @@ boot();
 
 async function gracefulShutdown() {
   systemState = "stopping";
+  telegramPollingActive = false;
   log("🛑 Shutting down gracefully...");
 
   // Clear the startup timer if it exists
