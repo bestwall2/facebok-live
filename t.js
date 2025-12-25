@@ -10,6 +10,8 @@
  * - 2 minute delay for CRASHED servers
  * - 3:45 hour stream key rotation (based on creation time)
  * - Server shutdown reports
+ * - /restart command
+ * - Token error reporting
  ******************************************************************/
 
 import fs from "fs";
@@ -29,7 +31,7 @@ const CONFIG = {
   },
   initialDelay: 50000, // 1:50 minutes for ALL servers initial start (110 seconds)
   newServerDelay: 30000, // 30 seconds for NEW servers
-  crashedServerDelay: 115000, // 2 minutes (120 seconds) for CRASHED servers
+  crashedServerDelay: 120000, // 2 minutes for CRASHED servers
   rotationInterval: 13500000, // 3:45 hours in milliseconds (3*60*60*1000 + 45*60*1000)
 };
 
@@ -44,8 +46,9 @@ let streamCache = new Map(); // stream_url cache WITH creationTime
 let streamStartTimes = new Map(); // track stream start times
 let streamRotationTimers = new Map(); // rotation timers
 let restartTimers = new Map(); // restart timers
-let serverStates = new Map(); // server states: 'starting', 'running', 'restarting', 'rotating'
+let serverStates = new Map(); // server states: 'starting', 'running', 'restarting', 'rotating', 'token_error'
 let startupTimer = null; // for initial startup delay
+let isRestarting = false; // flag to prevent multiple restarts
 
 /* ================= CACHE ================= */
 
@@ -153,16 +156,46 @@ async function getStreamAndDash(liveId, token) {
   throw new Error("Preview not ready");
 }
 
-// NEW: Create Facebook Live with timestamp
+// Create Facebook Live with timestamp
 async function createLiveWithTimestamp(token, name) {
-  const liveId = await createLive(token, name);
-  const preview = await getStreamAndDash(liveId, token);
-  
-  return {
-    liveId,
-    ...preview,
-    creationTime: Date.now() // Store when this stream key was created
-  };
+  try {
+    const liveId = await createLive(token, name);
+    const preview = await getStreamAndDash(liveId, token);
+    
+    return {
+      liveId,
+      ...preview,
+      creationTime: Date.now() // Store when this stream key was created
+    };
+  } catch (error) {
+    // Check if it's a token error
+    if (error.message.includes("access token") || 
+        error.message.includes("token") || 
+        error.message.includes("OAuth") ||
+        error.message.includes("permission") ||
+        error.message.includes("expired") ||
+        error.message.includes("invalid")) {
+      
+      const errorMsg = `❌ <b>TOKEN ERROR for ${name}</b>\n\n` +
+                      `Error: ${error.message}\n` +
+                      `Time: ${new Date().toLocaleString()}\n` +
+                      `Action: Stream will not start until token is fixed`;
+      
+      log(`🔴 Token error for ${name}: ${error.message}`);
+      
+      // Send to Telegram
+      await tg(errorMsg);
+      
+      // Mark server as failed
+      serverStates.set(name, "token_error");
+      
+      // Rethrow so caller knows it's a token error
+      throw new Error(`TOKEN_ERROR: ${error.message}`);
+    }
+    
+    // For other errors, just rethrow
+    throw error;
+  }
 }
 
 /* ================= CHECK AND ROTATE OLD KEYS ================= */
@@ -258,22 +291,40 @@ function startFFmpeg(item, force = false) {
     restartTimers.delete(item.id);
   }
 
-   const cmd = ffmpeg(item.source)
+  const cmd = ffmpeg(item.source)
     .inputOptions([
-      // User-Agent الاحتفاظ به
+      // User-Agent
       "-headers",
       "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36\r\n",
-      "-hide_banner", "-loglevel", "error",
-  
-      // Low-latency + reconnect + timeout
-      "-fflags", "+genpts+igndts+nobuffer",
-      "-flags", "low_delay",
-      "-rw_timeout", "3000000",
-      "-timeout", "3000000",
+      "-hide_banner",
+      "-loglevel", "error",
+      
+      // INPUT BUFFERING SETTINGS
+      "-buffer_size", "1024000",          // 1MB input buffer
+      "-max_delay", "5000000",            // 5 seconds max delay
+      "-re",                              // Read input at native frame rate
+      "-thread_queue_size", "512",        // Larger thread queue
+      
+      // Network settings with buffering
+      "-rw_timeout", "10000000",          // 10 second read timeout
+      "-timeout", "10000000",             // 10 second timeout
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_at_eof", "1",
-      "-reconnect_delay_max", "5",
+      "-reconnect_delay_max", "10",       // Max 10 seconds reconnect delay
+      "-reconnect_on_network_error", "1",
+      "-reconnect_on_http_error", "1",
+      "-multiple_requests", "1",
+      
+      // Input buffering flags
+      "-fflags", "+genpts+igndts+discardcorrupt+fastseek",
+      "-flags", "+global_header",
+      "-avioflags", "direct",             // Reduced buffering for live streams
+      "-max_error_rate", "1.0",
+      
+      // Hardware acceleration (if available)
+      "-hwaccel", "auto",
+      "-hwaccel_output_format", "auto",
     ])
     .videoCodec("libx264")
     .audioCodec("aac")
@@ -281,26 +332,47 @@ function startFFmpeg(item, force = false) {
     .audioFrequency(44100)
     .audioBitrate("128k")
     .outputOptions([
-      "-preset", "superfast",
+      // OUTPUT BUFFERING SETTINGS
+      "-preset", "ultrafast",            // Changed from superfast for lower latency
       "-tune", "zerolatency",
       "-profile:v", "main",
       "-level", "4.2",
       "-pix_fmt", "yuv420p",
       "-r", "30",
-      "-g", "60",
+      "-g", "60",                        // GOP size
       "-keyint_min", "60",
       "-sc_threshold", "0",
-      "-b:v", "6000k",
+      
+      // Bitrate control with buffering
+      "-b:v", "5000k",                   // Slightly lower bitrate
       "-maxrate", "6000k",
-      "-bufsize", "12000k",
+      "-bufsize", "10000k",              // Buffer size (2x maxrate)
+      "-minrate", "1000k",
+      "-rc-lookahead", "0",              // No lookahead for low latency
+      "-crf", "23",                      // Quality factor
+      
+      // Audio buffering
       "-af", "aresample=async=1:min_hard_comp=0.100:first_pts=0",
+      
+      // Output buffer settings
+      "-flvflags", "no_duration_filesize",
+      "-max_muxing_queue_size", "9999",  // Large muxing queue
+      
+      // RTMP/FLV specific buffering
       "-f", "flv",
       "-rtmp_live", "live",
-      "-rtmp_buffer", "50",
+      "-rtmp_buffer", "100",             // Increased from 50 to 100
+      
+      // Additional buffering for stability
+      "-movflags", "+faststart",
+      "-avoid_negative_ts", "make_zero",
+      "-copytb", "1",
+      "-use_wallclock_as_timestamps", "1",
     ])
     .output(cache.stream_url)
     .on("start", (commandLine) => {
-      log(`✅ FFmpeg started for ${item.name}`);
+      log(`✅ FFmpeg started for ${item.name} with buffering`);
+      log(`📊 FFmpeg command: ${commandLine}`);
       streamStartTimes.set(item.id, Date.now());
       serverStates.set(item.id, "running");
 
@@ -314,6 +386,13 @@ function startFFmpeg(item, force = false) {
     .on("end", () => {
       log(`🔚 FFmpeg ended for ${item.name}`);
       handleStreamCrash(item, "Stream ended unexpectedly");
+    })
+    .on("stderr", (stderrLine) => {
+      // Monitor FFmpeg warnings and info
+      if (stderrLine.includes("buffer") || stderrLine.includes("queue") || 
+          stderrLine.includes("speed") || stderrLine.includes("bitrate")) {
+        log(`📊 ${item.name} FFmpeg: ${stderrLine.trim()}`);
+      }
     });
 
   activeStreams.set(item.id, cmd);
@@ -475,6 +554,62 @@ async function rotateStreamKey(item) {
   }
 }
 
+/* ================= SYSTEM RESTART ================= */
+
+async function restartSystem() {
+  if (isRestarting) {
+    log("⚠️ System is already restarting, skipping...");
+    return;
+  }
+  
+  isRestarting = true;
+  log("🔄 SYSTEM RESTART COMMAND RECEIVED");
+  
+  // Set system state to stopping
+  systemState = "restarting";
+  
+  // Send notification
+  await tg("🔁 <b>System Restart Initiated</b>\nStopping all streams and cleaning up...");
+  
+  // Clear all timers
+  if (startupTimer) {
+    clearTimeout(startupTimer);
+  }
+  
+  restartTimers.forEach((timer, id) => {
+    clearTimeout(timer);
+  });
+  restartTimers.clear();
+  
+  streamRotationTimers.forEach((timer, id) => {
+    clearTimeout(timer);
+  });
+  streamRotationTimers.clear();
+  
+  // Stop all streams
+  for (const [id] of activeStreams) {
+    stopFFmpeg(id, true);
+  }
+  
+  activeStreams.clear();
+  streamStartTimes.clear();
+  serverStates.clear();
+  
+  // Wait for cleanup
+  await new Promise(r => setTimeout(r, 3000));
+  
+  // Reset system state
+  systemState = "running";
+  isRestarting = false;
+  
+  // Reboot the system
+  log("🔄 Restarting system from scratch...");
+  await tg("✅ <b>Cleanup Complete</b>\nNow booting up fresh system...");
+  
+  // Call boot function to restart everything
+  boot();
+}
+
 /* ================= UPTIME CALCULATION ================= */
 
 function formatUptime(uptimeMs) {
@@ -494,7 +629,7 @@ function formatUptime(uptimeMs) {
   return parts.join(" ");
 }
 
-// NEW: Format time since creation
+// Format time since creation
 function formatTimeSinceCreation(itemId) {
   const cache = streamCache.get(itemId);
   if (!cache || !cache.creationTime) return "Unknown";
@@ -647,6 +782,12 @@ async function watcher() {
           }, CONFIG.newServerDelay);
         } catch (error) {
           log(`❌ Error creating live for ${item.name}: ${error.message}`);
+          
+          // If it's a token error, mark it specially
+          if (error.message.includes("TOKEN_ERROR")) {
+            await tg(`⚠️ <b>${item.name}</b> skipped due to token error.\nFix token and system will auto-recover.`);
+            serverStates.set(item.id, "token_error");
+          }
         }
       }
     }
@@ -691,7 +832,7 @@ async function handleTelegramCommand(update) {
 
     const chatId = message.chat.id;
     const userId = message.from.id;
-    const command = message.text.trim();
+    const command = message.text.trim().toLowerCase();
     const now = Date.now();
 
     // Rate limiting: 1 command per 5 seconds per user
@@ -712,6 +853,13 @@ async function handleTelegramCommand(update) {
       oldest.forEach(([uid]) => lastCommandTime.delete(uid));
     }
 
+    // Handle /restart command
+    if (command === "/restart") {
+      await tg("🔄 <b>Restarting Stream Manager...</b>\nThis will take a moment...", chatId);
+      await restartSystem();
+      return;
+    }
+
     // Handle /info command
     if (command === "/info" || command.startsWith("/info")) {
       const report = await generateInfoReport();
@@ -730,7 +878,8 @@ async function handleTelegramCommand(update) {
         `🔧 Crashed Server Delay: ${CONFIG.crashedServerDelay / 1000}s\n` +
         `⏳ Rotation: ${CONFIG.rotationInterval / (1000 * 60 * 60)}h\n` +
         `🕒 Time: ${new Date().toLocaleString()}\n\n` +
-        `Use /info for detailed report`;
+        `Use /info for detailed report\n` +
+        `Use /restart to restart system`;
       await tg(status, chatId);
       return;
     }
@@ -741,6 +890,7 @@ async function handleTelegramCommand(update) {
         `🤖 <b>Stream Manager Bot Commands</b>\n\n` +
         `/info - Get detailed system and stream report\n` +
         `/status - Quick status check\n` +
+        `/restart - Restart the entire system\n` +
         `/help - Show this help message\n\n` +
         `<i>Auto-monitoring ${CONFIG.pollInterval / 1000}s intervals</i>\n` +
         `<i>New server delay: ${CONFIG.newServerDelay / 1000}s</i>\n` +
@@ -756,7 +906,6 @@ async function handleTelegramCommand(update) {
 }
 
 // Poll Telegram for updates
-// No import needed for AbortController in Node 18+
 async function telegramBotPolling() {
   let offset = 0;
 
@@ -792,7 +941,6 @@ async function telegramBotPolling() {
     await new Promise((r) => setTimeout(r, 1000));
   }
 }
-
 
 /* ================= FINAL CHECK ================= */
 
@@ -852,7 +1000,7 @@ async function boot() {
         `🔄 Auto-rotation: ${
           CONFIG.rotationInterval / (1000 * 60 * 60)
         } hours (based on creation time)\n` +
-        `Bot commands: /info /status /help`
+        `Bot commands: /info /status /restart /help`
     );
 
     // Create Facebook Live for any missing items WITH timestamp
@@ -866,6 +1014,17 @@ async function boot() {
           log(`✅ Created at ${new Date(newCache.creationTime).toLocaleString()}`);
         } catch (error) {
           log(`❌ Failed to create live for ${item.name}: ${error.message}`);
+          
+          // If token error, send detailed report
+          if (error.message.includes("TOKEN_ERROR")) {
+            await tg(
+              `🔴 <b>STARTUP ERROR</b>\n\n` +
+              `Stream: ${item.name}\n` +
+              `Error: Token is invalid or expired\n` +
+              `Details: ${error.message.replace("TOKEN_ERROR: ", "")}\n\n` +
+              `This stream will not start until token is fixed.`
+            );
+          }
         }
       }
     }
@@ -902,8 +1061,9 @@ async function boot() {
     log(`🤖 Telegram bot polling started`);
   } catch (error) {
     log(`❌ Boot failed: ${error.message}`);
-    await tg(`❌ <b>Stream Manager Boot Failed</b>\n${error.message}`);
-    process.exit(1);
+    await tg(`❌ <b>Stream Manager Boot Failed</b>\n${error.message}\n\nTry /restart to try again.`);
+    // Don't exit, keep trying
+    setTimeout(boot, 60000); // Try again in 1 minute
   }
 }
 
