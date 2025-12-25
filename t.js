@@ -293,38 +293,22 @@ function startFFmpeg(item, force = false) {
 
   const cmd = ffmpeg(item.source)
     .inputOptions([
-      // User-Agent
-      "-headers",
-      "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36\r\n",
+      "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36\r\n",
       "-hide_banner",
       "-loglevel", "error",
-      
-      // INPUT BUFFERING SETTINGS
-      "-buffer_size", "1024000",          // 1MB input buffer
-      "-max_delay", "5000000",            // 5 seconds max delay
-      "-re",                              // Read input at native frame rate
-      "-thread_queue_size", "512",        // Larger thread queue
-      
-      // Network settings with buffering
-      "-rw_timeout", "10000000",          // 10 second read timeout
-      "-timeout", "10000000",             // 10 second timeout
+      "-re",
+      "-fflags", "+genpts+igndts+discardcorrupt+fastseek",
+      "-flags", "+low_delay+global_header",
+      "-avioflags", "direct",
+      "-rw_timeout", "20000000",
+      "-timeout", "20000000",
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_at_eof", "1",
-      "-reconnect_delay_max", "10",       // Max 10 seconds reconnect delay
-      "-reconnect_on_network_error", "1",
-      "-reconnect_on_http_error", "1",
-      "-multiple_requests", "1",
-      
-      // Input buffering flags
-      "-fflags", "+genpts+igndts+discardcorrupt+fastseek",
-      "-flags", "+global_header",
-      "-avioflags", "direct",             // Reduced buffering for live streams
-      "-max_error_rate", "1.0",
-      
-      // Hardware acceleration (if available)
-      "-hwaccel", "auto",
-      "-hwaccel_output_format", "auto",
+      "-reconnect_delay_max", "10",
+      "-analyzeduration", "20000000",
+      "-probesize", "20000000",
+      "-thread_queue_size", "4096",
     ])
     .videoCodec("libx264")
     .audioCodec("aac")
@@ -332,42 +316,27 @@ function startFFmpeg(item, force = false) {
     .audioFrequency(44100)
     .audioBitrate("128k")
     .outputOptions([
-      // OUTPUT BUFFERING SETTINGS
-      "-preset", "ultrafast",            // Changed from superfast for lower latency
+      "-preset", "veryfast",
       "-tune", "zerolatency",
       "-profile:v", "main",
       "-level", "4.2",
       "-pix_fmt", "yuv420p",
       "-r", "30",
-      "-g", "60",                        // GOP size
+      "-g", "60",
       "-keyint_min", "60",
       "-sc_threshold", "0",
-      
-      // Bitrate control with buffering
-      "-b:v", "5000k",                   // Slightly lower bitrate
-      "-maxrate", "6000k",
-      "-bufsize", "10000k",              // Buffer size (2x maxrate)
-      "-minrate", "1000k",
-      "-rc-lookahead", "0",              // No lookahead for low latency
-      "-crf", "23",                      // Quality factor
-      
-      // Audio buffering
+      "-crf", "23",
+      "-bufsize", "20000k",           // Most important for buffering
+      "-x264opts", "no-scenecut:rc-lookahead=0",
       "-af", "aresample=async=1:min_hard_comp=0.100:first_pts=0",
-      
-      // Output buffer settings
-      "-flvflags", "no_duration_filesize",
-      "-max_muxing_queue_size", "9999",  // Large muxing queue
-      
-      // RTMP/FLV specific buffering
       "-f", "flv",
       "-rtmp_live", "live",
-      "-rtmp_buffer", "100",             // Increased from 50 to 100
-      
-      // Additional buffering for stability
+      "-rtmp_buffer", "1700",         // Increased RTMP buffer
+      "-max_muxing_queue_size", "9999",
       "-movflags", "+faststart",
       "-avoid_negative_ts", "make_zero",
-      "-copytb", "1",
-      "-use_wallclock_as_timestamps", "1",
+      "-muxdelay", "1.7",             // Muxing delay
+      "-muxpreload", "1.7",           // Muxing preload
     ])
     .output(cache.stream_url)
     .on("start", (commandLine) => {
