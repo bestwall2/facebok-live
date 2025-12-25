@@ -315,22 +315,29 @@ function startFFmpeg(item, force = false) {
 
   const cmd = ffmpeg(item.source)
     .inputOptions([
-      "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36\r\n",
+      // User-Agent
+      "-headers",
+      "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36\r\n",
       "-hide_banner",
       "-loglevel", "error",
-      "-re",
+      
+      // ENHANCED INPUT BUFFERING
+      "-re",                              // Read at native framerate
       "-fflags", "+genpts+igndts+discardcorrupt+fastseek",
       "-flags", "+low_delay+global_header",
       "-avioflags", "direct",
-      "-rw_timeout", "20000000",
-      "-timeout", "20000000",
+      "-max_error_rate", "1.0",
+      "-seekable", "0",
+      "-correct_ts_overflow", "1",
+      "-rw_timeout", "20000000",          // 20 seconds
+      "-timeout", "20000000",             // 20 seconds
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "10",
-      "-analyzeduration", "20000000",
-      "-probesize", "20000000",
-      "-thread_queue_size", "4096",
+      "-analyzeduration", "20000000",     // 20 seconds
+      "-probesize", "20000000",           // 20MB
+      "-thread_queue_size", "4096",       // Larger queue size
     ])
     .videoCodec("libx264")
     .audioCodec("aac")
@@ -338,7 +345,8 @@ function startFFmpeg(item, force = false) {
     .audioFrequency(44100)
     .audioBitrate("128k")
     .outputOptions([
-      "-preset", "veryfast",
+      // VIDEO ENCODING OPTIONS
+      "-preset", "veryfast",              // Better quality than ultrafast
       "-tune", "zerolatency",
       "-profile:v", "main",
       "-level", "4.2",
@@ -347,18 +355,34 @@ function startFFmpeg(item, force = false) {
       "-g", "60",
       "-keyint_min", "60",
       "-sc_threshold", "0",
-      "-crf", "23",
-      "-bufsize", "20000k",           // Most important for buffering
+      
+      // ENHANCED BUFFERING
+      "-crf", "23",                       // Quality factor
+      "-bufsize", "20000k",               // 20MB buffer (IMPORTANT)
+      "-maxrate", "6000k",
+      "-b:v", "5000k",
+      
+      // X264 SPECIFIC OPTIONS
       "-x264opts", "no-scenecut:rc-lookahead=0",
+      
+      // AUDIO PROCESSING
       "-af", "aresample=async=1:min_hard_comp=0.100:first_pts=0",
+      
+      // OUTPUT FORMAT WITH BUFFERING
       "-f", "flv",
       "-rtmp_live", "live",
-      "-rtmp_buffer", "1700",         // Increased RTMP buffer
+      "-rtmp_buffer", "1700",             // Increased buffer (1.7 seconds)
       "-max_muxing_queue_size", "9999",
+      
+      // TIMING AND SYNCHRONIZATION
       "-movflags", "+faststart",
       "-avoid_negative_ts", "make_zero",
-      "-muxdelay", "1.7",             // Muxing delay
-      "-muxpreload", "1.7",           // Muxing preload
+      "-copytb", "1",
+      "-use_wallclock_as_timestamps", "1",
+      
+      // MUXING BUFFERING
+      "-muxdelay", "1.7",                 // 1.7 seconds muxing delay
+      "-muxpreload", "1.7",               // 1.7 seconds muxing preload
     ])
     .output(cache.stream_url)
     .on("start", (commandLine) => {
