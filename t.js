@@ -332,12 +332,42 @@ async  function startFFmpeg(item, force = false) {
   }
 
 
-const cmd = ffmpeg(item.source)
+async function startFFmpeg(item, force = false) {
+  const cache = streamCache.get(item.id);
+  if (!cache) {
+    log(`❌ No cache for ${item.name}, cannot start`);
+    return;
+  }
+
+  if (activeStreams.has(item.id) && !force) {
+    log(`⚠️ ${item.name} is already running, skipping`);
+    return;
+  }
+
+  const timeUntilRotation = CONFIG.rotationInterval - (Date.now() - cache.creationTime);
+  if (timeUntilRotation <= 0) {
+    log(`⚠️ ${item.name} has expired key (${((Date.now() - cache.creationTime)/1000/60/60).toFixed(2)} hours old), rotating before starting`);
+    rotateStreamKey(item);
+    return;
+  }
+
+  // Wait 5 seconds before starting
+  log(`⏳ Waiting 5s before starting ${item.name}`);
+  await sleep(5000);
+
+  log(`▶ STARTING ${item.name} (key age: ${((Date.now() - cache.creationTime)/1000/60/60).toFixed(2)} hours)`);
+  serverStates.set(item.id, "starting");
+
+  if (restartTimers.has(item.id)) {
+    clearTimeout(restartTimers.get(item.id));
+    restartTimers.delete(item.id);
+  }
+
+  const cmd = ffmpeg(item.source)
     .inputOptions([
       "-hide_banner",
       "-loglevel", "error",
       "-re",
-      "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
       "-fflags", "+genpts+igndts+discardcorrupt",
       "-rw_timeout", "20000000",
       "-timeout", "20000000",
@@ -345,40 +375,38 @@ const cmd = ffmpeg(item.source)
       "-reconnect_streamed", "1",
       "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "10",
-      "-thread_queue_size", "4096"
+      "-thread_queue_size", "4096",
+      "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     ])
-    .videoCodec("libx264")
-    .audioCodec("aac")
-    .audioChannels(2)
-    .audioFrequency(44100)
-    .audioBitrate("128k")
+    .videoCodec("libx264")       // Single video codec
+    .audioCodec("aac")            // Single audio codec
+    .audioChannels(2)             // Stereo
+    .audioFrequency(48000)        // 48 kHz sample rate
+    .audioBitrate("128k")         // Audio bitrate
     .outputOptions([
-      "-c:v", "libx264",
+      // Video settings optimized for Facebook
       "-preset", "veryfast",
       "-profile:v", "main",
       "-level", "4.1",
       "-pix_fmt", "yuv420p",
       "-r", "30",
-      "-g", "60",
+      "-g", "60",          // Keyframe every 2 seconds
       "-keyint_min", "60",
       "-sc_threshold", "0",
-      "-b:v", "4500k",
+      "-b:v", "4500k",     // Facebook recommends 4000–6000k for 1080p
       "-maxrate", "4500k",
       "-bufsize", "9000k",
       "-x264opts", "nal-hrd=cbr:force-cfr=1",
-  
-      "-c:a", "aac",
-      "-b:a", "128k",
-      "-ac", "2",
-      "-ar", "48000",
-  
+
+      // Facebook RTMPS / FLV settings
       "-f", "flv",
       "-rtmp_live", "live",
-      "-max_muxing_queue_size", "2048"
+      "-max_muxing_queue_size", "2048",
+      "-flvflags", "no_duration_filesize"
     ])
     .output(cache.stream_url)
     .on("start", (commandLine) => {
-      log(`✅ FFmpeg started for ${item.name} with enhanced buffering`);
+      log(`✅ FFmpeg started for ${item.name}`);
       streamStartTimes.set(item.id, Date.now());
       serverStates.set(item.id, "running");
       startRotationTimer(item);
@@ -403,6 +431,7 @@ const cmd = ffmpeg(item.source)
   activeStreams.set(item.id, cmd);
   cmd.run();
 }
+
 
 function handleStreamCrash(item, reason) {
   const state = serverStates.get(item.id);
