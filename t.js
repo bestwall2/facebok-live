@@ -298,7 +298,7 @@ function sleep(ms) {
 
 /* ================= FFMPEG WITH ENHANCED BUFFERING ================= */
 
-function startFFmpeg(item, force = false) {
+async  function startFFmpeg(item, force = false) {
   const cache = streamCache.get(item.id);
   if (!cache) {
     log(`❌ No cache for ${item.name}, cannot start`);
