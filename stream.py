@@ -133,7 +133,7 @@ def fetch_live_details(live_id: str, access_token: str) -> Dict:
     """
     Fetch stream_url, stream_key, dash_preview_url and other useful fields for a created live video.
     """
-    fields = "id,stream_url,secure_stream_url,stream_key,dash_preview_url"
+    fields = "id,stream_url,secure_stream_url,dash_preview_url"
     url = f"{FB_GRAPH_BASE}/{live_id}"
     params = {
         "access_token": access_token,
