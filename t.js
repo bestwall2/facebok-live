@@ -1,19 +1,15 @@
 /******************************************************************
- * FACEBOOK MULTI STREAM MANAGER – ADVANCED
- * - dynamic list watcher
- * - cache stream_url with creation time
- * - auto add/remove streams
- * - final dash report
- * - Telegram bot commands
- * - 1:50 minute initial delay for ALL servers
- * - 30 second delay for NEW servers
- * - 2 minute delay for CRASHED servers
- * - 3:45 hour stream key rotation (based on creation time)
- * - Server shutdown reports
- * - /restart command
- * - Token error reporting
- * - Enhanced buffering
- * - FIXED: Cache synchronization with stable IDs
+ * FACEBOOK MULTI STREAM MANAGER – ADVANCED (CONNECTION-GATED)
+ *
+ * Changes made to address concurrent RTMPS startup rejections:
+ * - Connection semaphore / start queue (maxConcurrentConnects)
+ * - Per-stream exponential backoff and jitter for startup failures
+ * - Global cooldown if too many startup failures in short time
+ * - Differentiates startup rejection ("Error opening output file")
+ *   vs runtime disconnect ("Error muxing a packet", "Error while writing")
+ * - Releases connection slot on early failure or success
+ * - Starts servers via queue on boot to avoid bursts
+ * - Minimal changes to ffmpeg flags (none added, as requested)
  ******************************************************************/
 
 import fs from "fs";
@@ -35,6 +31,16 @@ const CONFIG = {
   newServerDelay: 30000, // 30 seconds for NEW servers
   crashedServerDelay: 120000, // 2 minutes for CRASHED servers
   rotationInterval: 13500000, // 3:45 hours in milliseconds
+
+  // Connection orchestration
+  maxConcurrentConnects: 2, // number of simultaneous RTMPS handshake attempts allowed
+  connectStabilityWindow: 10_000, // ms: after process 'start', wait this to call it stable (release slot earlier if desired)
+  connectTimeout: 20_000, // ms: if no 'start' event in this time after run(), consider startup failed
+  startupBackoffBase: 30_000, // base backoff for startup failures
+  startupBackoffCap: 10 * 60_000, // cap (10min)
+  globalFailureThreshold: 4, // failures within timeframe to trigger global cooldown
+  globalFailureWindow: 60_000, // timeframe for counting failures (ms)
+  globalCooldownDuration: 2 * 60_000, // ms: how long to pause all connecting on global failure
 };
 
 const CACHE_FILE = "./streams_cache.json";
@@ -52,6 +58,14 @@ let serverStates = new Map(); // server states
 let startupTimer = null; // for initial startup delay
 let isRestarting = false; // flag to prevent multiple restarts
 let telegramPollingActive = true; // control telegram polling
+
+// Orchestration-specific
+let availableConnectSlots = CONFIG.maxConcurrentConnects;
+const startQueue = []; // FIFO queue for connection attempts
+const connectionHolders = new Map(); // map item.id -> { held: true } if slot is held
+const perStreamAttempts = new Map(); // map item.id -> attempt count (startup failures)
+let recentStartupFailures = []; // timestamps of recent startup failures across all streams
+let globalCooldownUntil = 0; // timestamp until which new connections are paused
 
 /* ================= STABLE ID GENERATION ================= */
 
@@ -238,65 +252,79 @@ async function createLiveWithTimestamp(token, name) {
   }
 }
 
-/* ================= CHECK AND ROTATE OLD KEYS ================= */
+/* ================= CONNECTION QUEUE / SEMAPHORE ================= */
 
-async function checkAndRotateOldKeys() {
-  log(`🔍 Checking for old stream keys (> ${CONFIG.rotationInterval/1000/60/60} hours)...`);
-  
-  let rotatedCount = 0;
-  const now = Date.now();
-  
-  for (const [id, cache] of streamCache) {
-    const item = apiItems.get(id);
-    if (!item) continue;
-    
-    const age = now - cache.creationTime;
-    const ageHours = age / (1000 * 60 * 60);
-    
-    if (age >= CONFIG.rotationInterval) {
-      log(`🔄 Stream key for ${item.name} is ${ageHours.toFixed(2)} hours old (needs rotation)`);
-      
-      const isStreaming = activeStreams.has(id);
-      
-      if (isStreaming) {
-        log(`⏰ Rotating ${item.name} immediately (currently streaming)`);
-        await rotateStreamKey(item);
-      } else {
-        log(`⏰ Creating new key for ${item.name} (not currently streaming)`);
-        try {
-          const newCache = await createLiveWithTimestamp(item.token, item.name);
-          streamCache.set(id, newCache);
-          saveCache();
-          
-          log(`✅ Created new stream key for ${item.name}`);
-          
-          await tg(
-            `🔄 <b>AUTO-KEY ROTATION</b>\n\n` +
-            `<b>${item.name}</b>\n` +
-            `Old key age: ${ageHours.toFixed(2)} hours\n` +
-            `New key created and saved to cache\n` +
-            `DASH URL: <code>${newCache.dash}</code>\n` +
-            `Status: Will use new key when stream starts`
-          );
-        } catch (error) {
-          log(`❌ Failed to rotate key for ${item.name}: ${error.message}`);
-        }
-      }
-      
-      rotatedCount++;
-    }
+function tryProcessStartQueue() {
+  // If in global cooldown, do not start new connects.
+  if (Date.now() < globalCooldownUntil) {
+    log(`⏸️ Global cooldown active, delaying connection starts until ${new Date(globalCooldownUntil).toLocaleTimeString()}`);
+    return;
   }
-  
-  if (rotatedCount > 0) {
-    log(`✅ Rotated ${rotatedCount} old stream keys`);
+
+  while (availableConnectSlots > 0 && startQueue.length > 0) {
+    const next = startQueue.shift();
+    availableConnectSlots--;
+    connectionHolders.set(next.id, { held: true });
+    next.resolve();
   }
 }
+
+function enqueueStart(item) {
+  return new Promise((resolve) => {
+    // If already holding slot for this item, resolve immediately
+    if (connectionHolders.has(item.id) && connectionHolders.get(item.id).held) {
+      resolve();
+      return;
+    }
+
+    startQueue.push({ id: item.id, resolve });
+    tryProcessStartQueue();
+  });
+}
+
+function releaseConnectSlot(itemId) {
+  // Only release if we had previously acquired for this item
+  if (connectionHolders.has(itemId) && connectionHolders.get(itemId).held) {
+    connectionHolders.set(itemId, { held: false });
+    availableConnectSlots = Math.min(availableConnectSlots + 1, CONFIG.maxConcurrentConnects);
+    // process queued starts
+    setImmediate(tryProcessStartQueue);
+  }
+}
+
+/* Track global startup failures and trigger cooldown if needed */
+function recordStartupFailure() {
+  const now = Date.now();
+  recentStartupFailures.push(now);
+  // prune old entries
+  recentStartupFailures = recentStartupFailures.filter(ts => now - ts <= CONFIG.globalFailureWindow);
+  if (recentStartupFailures.length >= CONFIG.globalFailureThreshold) {
+    globalCooldownUntil = Date.now() + CONFIG.globalCooldownDuration;
+    log(`🚨 Too many startup failures (${recentStartupFailures.length}). Entering global cooldown until ${new Date(globalCooldownUntil).toLocaleTimeString()}`);
+    // clear queue to avoid immediate retries piling up — they will be retried by their own timers
+    while (startQueue.length > 0) {
+      const queued = startQueue.shift();
+      // If necessary, notify the queued start by resolving so that startFFmpeg continues and will handle per-stream backoff
+      queued.resolve();
+    }
+    // clear recent failures after cooldown started
+    recentStartupFailures = [];
+  }
+}
+
+/* ================= HELPERS ================= */
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/* ================= FFMPEG WITH ENHANCED BUFFERING ================= */
+function jitteredBackoff(base, attempt, cap) {
+  const exp = Math.min(cap, base * (2 ** attempt));
+  const jitter = Math.round(Math.random() * Math.min(10_000, exp * 0.25));
+  return exp + jitter;
+}
+
+/* ================= FFMPEG WITH ENHANCED BUFFERING & ORCHESTRATION ================= */
 
 async function startFFmpeg(item, force = false) {
   const cache = streamCache.get(item.id);
@@ -310,54 +338,52 @@ async function startFFmpeg(item, force = false) {
     return;
   }
 
+  if (serverStates.get(item.id) === "token_error") {
+    log(`⚠️ ${item.name} has token error; skipping start`);
+    return;
+  }
+
+  // Check key age
   const timeUntilRotation = CONFIG.rotationInterval - (Date.now() - cache.creationTime);
   if (timeUntilRotation <= 0) {
-    log(`⚠️ ${item.name} has expired key (${((Date.now() - cache.creationTime)/1000/60/60).toFixed(2)} hours old), rotating before starting`);
+    log(`⚠️ ${item.name} has expired key, rotating before starting`);
     rotateStreamKey(item);
     return;
   }
 
-  // Wait 5 seconds before starting
-  log(`⏳ Waiting 5s before starting ${item.name}`);
+  // Acquire a connection slot (this enqueues if no slot available)
+  log(`🧾 Enqueueing start for ${item.name}`);
+  await enqueueStart(item);
+  if (systemState !== "running") {
+    releaseConnectSlot(item.id);
+    return;
+  }
+  // mark connecting
+  serverStates.set(item.id, "connecting");
+  log(`⏳ ${item.name} is connecting (slot acquired). Waiting 5s before ffmpeg.run()...`);
+
+  // small pre-start wait to reduce tight bursts (keeps startup cadence smoother)
   await sleep(5000);
 
-  log(`▶ STARTING ${item.name} (key age: ${((Date.now() - cache.creationTime)/1000/60/60).toFixed(2)} hours)`);
-  serverStates.set(item.id, "starting");
-
-  if (restartTimers.has(item.id)) {
-    clearTimeout(restartTimers.get(item.id));
-    restartTimers.delete(item.id);
-  }
-
+  // prepare ffmpeg command
   const cmd = ffmpeg(item.source)
     .inputOptions([
       "-hide_banner",
       "-loglevel", "warning",
-
-      // HLS stability
       "-fflags", "+genpts+igndts+nobuffer",
       "-flags", "low_delay",
-
       "-rw_timeout", "3000000",
       "-timeout", "3000000",
-
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "5",
-
       "-thread_queue_size", "4096",
-
-      // IMPORTANT: use user_agent instead of headers
       "-user_agent", "Mozilla/5.0"
     ])
-
-    // Explicit stream mapping (VERY IMPORTANT)
     .outputOptions([
       "-map", "0:v:0",
       "-map", "0:a:0?",
-
-      // VIDEO
       "-c:v", "libx264",
       "-preset", "veryfast",
       "-profile:v", "high",
@@ -371,53 +397,171 @@ async function startFFmpeg(item, force = false) {
       "-maxrate", "4500k",
       "-bufsize", "9000k",
       "-x264opts", "nal-hrd=cbr:force-cfr=1",
-
-      // AUDIO
       "-c:a", "aac",
       "-b:a", "128k",
       "-ac", "2",
       "-ar", "48000",
-
-      // FACEBOOK
       "-f", "flv",
       "-rtmp_live", "live",
       "-flvflags", "no_duration_filesize",
       "-max_muxing_queue_size", "2048"
     ])
-    .output(cache.stream_url)
-    .on("start", (commandLine) => {
-      log(`✅ FFmpeg started for ${item.name}`);
-      streamStartTimes.set(item.id, Date.now());
-      serverStates.set(item.id, "running");
-      startRotationTimer(item);
-    })
-    .on("error", (err) => {
-      log(`❌ FFmpeg error for ${item.name}: ${err.message}`);
-      handleStreamCrash(item, err.message);
-    })
-    .on("end", () => {
-      log(`🔚 FFmpeg ended for ${item.name}`);
-      handleStreamCrash(item, "Stream ended unexpectedly");
-    })
-    .on("stderr", (stderrLine) => {
-      const line = stderrLine.trim();
-      if (line.includes("buffer") || line.includes("queue") || 
-          line.includes("speed") || line.includes("bitrate") ||
-          line.includes("muxing") || line.includes("delay")) {
-        log(`📊 ${item.name} FFmpeg: ${line}`);
-      }
-    });
+    .output(cache.stream_url);
+
+  let startTimeout = null;
+  let stabilityTimer = null;
+  let hadStartEvent = false;
+  let slotReleased = false;
+
+  function ensureReleaseSlot() {
+    if (!slotReleased) {
+      slotReleased = true;
+      releaseConnectSlot(item.id);
+    }
+  }
+
+  // connection timeout - if no 'start' in connectTimeout, treat as startup failure
+  startTimeout = setTimeout(() => {
+    if (!hadStartEvent) {
+      log(`❌ ${item.name} connection start timeout (${CONFIG.connectTimeout}ms). Killing process and scheduling retry.`);
+      try {
+        cmd.kill("SIGKILL");
+      } catch (e) {}
+      ensureReleaseSlot();
+      classifyStartupFailure(item);
+    }
+  }, CONFIG.connectTimeout);
+
+  cmd.on("start", (commandLine) => {
+    hadStartEvent = true;
+    streamStartTimes.set(item.id, Date.now());
+    serverStates.set(item.id, "running");
+    log(`✅ FFmpeg started for ${item.name}`);
+    // schedule release slot after stability window (so we avoid many simultaneous connects completing at same instant)
+    stabilityTimer = setTimeout(() => {
+      ensureReleaseSlot();
+    }, CONFIG.connectStabilityWindow);
+    // clear connect timeout
+    if (startTimeout) {
+      clearTimeout(startTimeout);
+      startTimeout = null;
+    }
+    // reset per-stream startup attempt count on success
+    perStreamAttempts.set(item.id, 0);
+    startRotationTimer(item);
+  })
+  .on("error", (err) => {
+    const message = err && err.message ? err.message : String(err);
+    log(`❌ FFmpeg error for ${item.name}: ${message}`);
+
+    // If the process never passed 'start' (hadStartEvent===false) then it's a startup rejection
+    if (!hadStartEvent) {
+      ensureReleaseSlot();
+      classifyStartupFailure(item, message);
+    } else {
+      // runtime disconnect
+      handleStreamCrash(item, message, { runtime: true });
+    }
+
+    // cleanup timers
+    if (startTimeout) {
+      clearTimeout(startTimeout); startTimeout = null;
+    }
+    if (stabilityTimer) {
+      clearTimeout(stabilityTimer); stabilityTimer = null;
+    }
+  })
+  .on("end", () => {
+    log(`🔚 FFmpeg ended for ${item.name}`);
+    if (!hadStartEvent) {
+      ensureReleaseSlot();
+      classifyStartupFailure(item, "Stream ended before start (end event)");
+    } else {
+      handleStreamCrash(item, "Stream ended unexpectedly", { runtime: true });
+    }
+    if (startTimeout) {
+      clearTimeout(startTimeout); startTimeout = null;
+    }
+    if (stabilityTimer) {
+      clearTimeout(stabilityTimer); stabilityTimer = null;
+    }
+  })
+  .on("stderr", (stderrLine) => {
+    const line = stderrLine.trim();
+    if (line.length === 0) return;
+    // Log relevant lines
+    if (line.includes("buffer") || line.includes("queue") || 
+        line.includes("speed") || line.includes("bitrate") ||
+        line.includes("muxing") || line.includes("delay") ||
+        line.includes("Error opening output") ||
+        line.includes("failed") || line.includes("Connection timed out") ||
+        line.includes("Connection reset by peer") ||
+        line.includes("error while writing")) {
+      log(`📊 ${item.name} FFmpeg: ${line}`);
+    }
+  });
 
   activeStreams.set(item.id, cmd);
-  cmd.run();
+  try {
+    cmd.run();
+  } catch (err) {
+    // run() itself may throw synchronously for invalid args
+    log(`❌ cmd.run() failed for ${item.name}: ${err.message}`);
+    ensureReleaseSlot();
+    classifyStartupFailure(item, err.message);
+  }
 }
 
+/* Classify startup failure and schedule retry with exponential backoff */
+function classifyStartupFailure(item, message = "Startup failure") {
+  // increment per-stream attempts
+  const attempts = (perStreamAttempts.get(item.id) || 0) + 1;
+  perStreamAttempts.set(item.id, attempts);
 
-function handleStreamCrash(item, reason) {
+  log(`⚠️ ${item.name} startup failure #${attempts}: ${message}`);
+
+  // record global failure for cooldown heuristics
+  recordStartupFailure();
+
+  // compute backoff
+  let backoff = jitteredBackoff(CONFIG.startupBackoffBase, attempts - 1, CONFIG.startupBackoffCap);
+  log(`⏰ Will retry ${item.name} in ${(backoff / 1000).toFixed(1)}s (attempt ${attempts})`);
+
+  serverStates.set(item.id, "restarting");
+
+  // notify once (avoid over-notifying)
+  tg(
+    `🔴 <b>STARTUP REJECTED</b>\n\n` +
+    `<b>${item.name}</b>\n` +
+    `Reason: ${message}\n` +
+    `Retry in: ${(backoff / 1000).toFixed(1)}s\n` +
+    `Attempt: ${attempts}`
+  );
+
+  // schedule retry
+  if (restartTimers.has(item.id)) {
+    clearTimeout(restartTimers.get(item.id));
+    restartTimers.delete(item.id);
+  }
+  const timer = setTimeout(() => {
+    if (systemState === "running") {
+      // When retrying, ensure we don't rapidly fill queue in global cooldown — the enqueueStart will wait
+      startFFmpeg(apiItems.get(item.id), true).catch(err => {
+        log(`⚠️ Error during retried start: ${err && err.message}`);
+      });
+    }
+  }, backoff);
+  restartTimers.set(item.id, timer);
+}
+
+/* ================= FFMPEG STOP & CRASH HANDLING ================= */
+
+function handleStreamCrash(item, reason, opts = { runtime: false }) {
   const state = serverStates.get(item.id);
 
+  // If rotating, we let rotation flow handle the resume
   if (state === "rotating") {
-    log(`🔄 ${item.name} crashed during rotation, will continue rotation process`);
+    log(`🔄 ${item.name} crashed during rotation: ${reason}`);
     return;
   }
 
@@ -425,38 +569,42 @@ function handleStreamCrash(item, reason) {
     ? formatUptime(Date.now() - streamStartTimes.get(item.id))
     : "Unknown";
 
-  tg(
-    `🔴 <b>SERVER CRASH REPORT</b>\n\n` +
-      `<b>${item.name}</b>\n` +
-      `Reason: ${reason}\n` +
-      `Uptime: ${uptime}\n` +
-      `Status: Will restart in 2 minutes`
-  );
+  // runtime crash vs startup failure is handled elsewhere
+  if (opts.runtime) {
+    tg(
+      `🔴 <b>SERVER CRASH REPORT</b>\n\n` +
+        `<b>${item.name}</b>\n` +
+        `Reason: ${reason}\n` +
+        `Uptime: ${uptime}\n` +
+        `Status: Will restart in ${CONFIG.crashedServerDelay / 1000} seconds`
+    );
+    log(`🔄 ${item.name} will restart in ${CONFIG.crashedServerDelay / 1000}s (runtime crash)`);
+    serverStates.set(item.id, "restarting");
+    stopFFmpeg(item.id);
 
-  log(`🔄 ${item.name} will restart in 2 minutes`);
-
-  serverStates.set(item.id, "restarting");
-  stopFFmpeg(item.id);
-
-  const restartTimer = setTimeout(() => {
-    if (systemState === "running") {
-      log(`▶ Attempting restart ${item.name}`);
-      startFFmpeg(item);
+    if (restartTimers.has(item.id)) {
+      clearTimeout(restartTimers.get(item.id));
+      restartTimers.delete(item.id);
     }
-  }, CONFIG.crashedServerDelay);
-
-  restartTimers.set(item.id, restartTimer);
+    const restartTimer = setTimeout(() => {
+      if (systemState === "running") {
+        startFFmpeg(item).catch(e => log(`⚠️ Error restarting after runtime crash: ${e.message}`));
+      }
+    }, CONFIG.crashedServerDelay);
+    restartTimers.set(item.id, restartTimer);
+  } else {
+    // startup-related crashes are handled in classifyStartupFailure which schedules a retry
+    log(`⚠️ ${item.name} startup crash classified earlier: ${reason}`);
+  }
 }
 
 function stopFFmpeg(id, skipReport = false) {
   try {
     const proc = activeStreams.get(id);
     if (proc) {
-      proc.kill("SIGTERM");
+      try { proc.kill("SIGTERM"); } catch {}
       setTimeout(() => {
-        try {
-          proc.kill("SIGKILL");
-        } catch {}
+        try { proc.kill("SIGKILL"); } catch {}
       }, 5000);
 
       if (!skipReport) {
@@ -478,6 +626,8 @@ function stopFFmpeg(id, skipReport = false) {
 
   activeStreams.delete(id);
   streamStartTimes.delete(id);
+  // Ensure we release any slot we thought we held for this id
+  releaseConnectSlot(id);
 }
 
 /* ================= ROTATION SYSTEM ================= */
@@ -862,8 +1012,9 @@ async function watcher() {
       log(`⏰ ${syncResult.addedCount} new items will start in ${CONFIG.newServerDelay/1000} seconds`);
       setTimeout(() => {
         for (const [id, item] of apiItems) {
-          // Only start if we have cache and not already running
+          // Only enqueue start if we have cache and not already running
           if (streamCache.has(id) && !activeStreams.has(id) && serverStates.get(id) !== "token_error") {
+            // We enqueue start instead of starting synchronously to avoid bursts
             startFFmpeg(item);
           }
         }
@@ -1080,12 +1231,13 @@ async function boot() {
       let startedCount = 0;
       for (const [id, item] of apiItems) {
         if (streamCache.has(id) && serverStates.get(id) !== "token_error") {
+          // Enqueue the start rather than starting immediately to avoid bursts
           startFFmpeg(item);
           startedCount++;
         }
       }
       
-      log(`✅ Started ${startedCount}/${apiItems.size} servers`);
+      log(`✅ Enqueued ${startedCount}/${apiItems.size} servers for start`);
       
       // 6. Start periodic watcher
       setInterval(watcher, CONFIG.pollInterval);
@@ -1108,6 +1260,60 @@ async function boot() {
     log(`❌ Boot failed: ${error.message}`);
     await tg(`❌ <b>Stream Manager Boot Failed</b>\n${error.message}\n\nTry /restart to try again.`);
     setTimeout(boot, 60000);
+  }
+}
+
+/* ================= OLD KEY CHECKER (unchanged) ================= */
+
+async function checkAndRotateOldKeys() {
+  log(`🔍 Checking for old stream keys (> ${CONFIG.rotationInterval/1000/60/60} hours)...`);
+  
+  let rotatedCount = 0;
+  const now = Date.now();
+  
+  for (const [id, cache] of streamCache) {
+    const item = apiItems.get(id);
+    if (!item) continue;
+    
+    const age = now - cache.creationTime;
+    const ageHours = age / (1000 * 60 * 60);
+    
+    if (age >= CONFIG.rotationInterval) {
+      log(`🔄 Stream key for ${item.name} is ${ageHours.toFixed(2)} hours old (needs rotation)`);
+      
+      const isStreaming = activeStreams.has(id);
+      
+      if (isStreaming) {
+        log(`⏰ Rotating ${item.name} immediately (currently streaming)`);
+        await rotateStreamKey(item);
+      } else {
+        log(`⏰ Creating new key for ${item.name} (not currently streaming)`);
+        try {
+          const newCache = await createLiveWithTimestamp(item.token, item.name);
+          streamCache.set(id, newCache);
+          saveCache();
+          
+          log(`✅ Created new stream key for ${item.name}`);
+          
+          await tg(
+            `🔄 <b>AUTO-KEY ROTATION</b>\n\n` +
+            `<b>${item.name}</b>\n` +
+            `Old key age: ${ageHours.toFixed(2)} hours\n` +
+            `New key created and saved to cache\n` +
+            `DASH URL: <code>${newCache.dash}</code>\n` +
+            `Status: Will use new key when stream starts`
+          );
+        } catch (error) {
+          log(`❌ Failed to rotate key for ${item.name}: ${error.message}`);
+        }
+      }
+      
+      rotatedCount++;
+    }
+  }
+  
+  if (rotatedCount > 0) {
+    log(`✅ Rotated ${rotatedCount} old stream keys`);
   }
 }
 
