@@ -292,6 +292,10 @@ async function checkAndRotateOldKeys() {
   }
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 /* ================= FFMPEG WITH ENHANCED BUFFERING ================= */
 
 function startFFmpeg(item, force = false) {
@@ -313,6 +317,12 @@ function startFFmpeg(item, force = false) {
     return;
   }
 
+  
+  // Wait before starting FFmpeg
+
+    log(`⏳ Waiting ${delayMs}ms before starting ${item.name}`);
+    await sleep(5000);
+  
   log(`▶ STARTING ${item.name} (key age: ${((Date.now() - cache.creationTime)/1000/60/60).toFixed(2)} hours)`);
   serverStates.set(item.id, "starting");
 
@@ -321,7 +331,6 @@ function startFFmpeg(item, force = false) {
     restartTimers.delete(item.id);
   }
 
-  const timeout = setTimeout(() => controller.abort(), 5000);
 
 const cmd = ffmpeg(item.source)
     .inputOptions([
