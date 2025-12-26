@@ -321,6 +321,8 @@ function startFFmpeg(item, force = false) {
     restartTimers.delete(item.id);
   }
 
+  const timeout = setTimeout(() => controller.abort(), 5000);
+
   const cmd = ffmpeg(item.source)
     .inputOptions([
       "-headers",
