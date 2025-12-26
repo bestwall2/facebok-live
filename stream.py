@@ -1,19 +1,16 @@
-
 #!/usr/bin/env python3
 """
-Resilient multi-streamer: one source per live video with automatic restart on errors.
+Resilient multi-streamer (updated to handle Graph API that does not return
+a separate `stream_key` field).
 
-This version replaces the earlier simple runner with a StreamWorker class that:
-- Starts ffmpeg in its own process group.
-- Reads ffmpeg stderr and treats error-like lines as signals to restart the process.
-- Performs exponential backoff when restarting a failing ffmpeg instance.
-- Uses more tolerant ffmpeg/input flags to handle HLS/network glitches:
-    - '-fflags +genpts+igndts+nobuffer+discardcorrupt'
-    - '-err_detect ignore_err'
-    - '-rw_timeout' to limit blocking reads
-    - reduced ffmpeg loglevel to 'error' so only serious messages appear
-- Prints/logs only ffmpeg error lines (keeps stdout quieter).
-- Gracefully terminates ffmpeg and all children on SIGINT/SIGTERM.
+Changes in this version:
+- Do NOT request `stream_key` from Facebook Graph API (some API versions return an error).
+- If `stream_key` is not provided, extract it from `stream_url` (if possible).
+  Typical Facebook `stream_url` values include the key as the last path segment,
+  e.g. rtmps://live-api-s.facebook.com:443/rtmp/STREAM_KEY
+- Logs clearly when the key is extracted from stream_url and prints id/dash/stream_url/key.
+- Keeps robust StreamWorker behavior (auto-restart on problematic ffmpeg errors).
+- ffmpeg loglevel remains `error` and only error lines are printed.
 
 Usage:
 - Set ACCESS_TOKEN in env.
@@ -31,6 +28,7 @@ import logging
 import subprocess
 import threading
 from typing import List, Dict, Optional
+from urllib.parse import urlparse, parse_qs
 
 try:
     import requests
@@ -64,6 +62,36 @@ logging.basicConfig(
 )
 logger = logging.getLogger("streamer")
 
+# ========== UTIL: extract key from stream_url ==========
+def extract_stream_key_from_stream_url(stream_url: Optional[str]) -> Optional[str]:
+    """
+    Attempt to extract the stream key from a Facebook `stream_url`.
+    Common format: rtmps://live-api-s.facebook.com:443/rtmp/STREAM_KEY
+    Returns None if not able to extract.
+    """
+    if not stream_url:
+        return None
+    try:
+        parsed = urlparse(stream_url)
+        # Look for last path segment
+        path = parsed.path or ""
+        if path:
+            parts = [p for p in path.split("/") if p]
+            if parts:
+                # Last segment likely the stream key
+                candidate = parts[-1]
+                # Some URLs might include query param with key instead (rare)
+                if candidate:
+                    return candidate
+        # fallback: check query parameters for common names
+        qs = parse_qs(parsed.query)
+        for keyname in ("stream_key", "key", "k"):
+            if keyname in qs and qs[keyname]:
+                return qs[keyname][0]
+    except Exception:
+        logger.debug("Failed to parse stream_url for key extraction: %s", stream_url, exc_info=True)
+    return None
+
 # ========== FFMPEG CMD ==========
 def build_ffmpeg_cmd(source: str, rtmp_target: str) -> List[str]:
     # Using conservative/robust options for network/HLS inputs and tolerating corrupt frames.
@@ -71,10 +99,9 @@ def build_ffmpeg_cmd(source: str, rtmp_target: str) -> List[str]:
         FFMPEG_PATH,
         "-loglevel", "error",  # emit only errors from ffmpeg itself
         "-re",
-        # Input-related options to make HLS/HTTP more robust
         "-fflags", "+genpts+igndts+nobuffer+discardcorrupt",
         "-err_detect", "ignore_err",
-        "-rw_timeout", "3000000",  # microseconds? ffmpeg expects microseconds
+        "-rw_timeout", "3000000",
         "-reconnect", "1",
         "-reconnect_streamed", "1",
         "-reconnect_at_eof", "1",
@@ -82,10 +109,8 @@ def build_ffmpeg_cmd(source: str, rtmp_target: str) -> List[str]:
         "-thread_queue_size", "4096",
         "-user_agent", "Mozilla/5.0",
         "-i", source,
-        # mappings
         "-map", "0:v:0",
         "-map", "0:a:0?",
-        # video
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-profile:v", "high",
@@ -99,12 +124,10 @@ def build_ffmpeg_cmd(source: str, rtmp_target: str) -> List[str]:
         "-maxrate", "4500k",
         "-bufsize", "9000k",
         "-x264opts", "nal-hrd=cbr:force-cfr=1",
-        # audio
         "-c:a", "aac",
         "-b:a", "128k",
         "-ac", "2",
         "-ar", "48000",
-        # output
         "-f", "flv",
         "-rtmp_live", "live",
         "-flvflags", "no_duration_filesize",
@@ -124,7 +147,9 @@ def create_unpublished_live(access_token: str, title: str = "") -> Dict:
     return data
 
 def fetch_live_details(live_id: str, access_token: str) -> Dict:
-    fields = "id,stream_url,secure_stream_url,stream_key,dash_preview_url"
+    # Do NOT request `stream_key` (some Graph API versions return an error when requesting it).
+    # Request only fields that are commonly available.
+    fields = "id,stream_url,secure_stream_url,dash_preview_url"
     url = f"{FB_GRAPH_BASE}/{live_id}"
     params = {"access_token": access_token, "fields": fields}
     logger.info("Fetching details for live id=%s", live_id)
@@ -154,15 +179,24 @@ def create_multiple_lives(count: int, access_token: str) -> List[Dict]:
             if not live_id:
                 raise RuntimeError("Missing id in create response")
             details = fetch_live_details(live_id, access_token)
+            stream_url = details.get("stream_url") or details.get("secure_stream_url")
+            # Try to extract stream_key from stream_url if no explicit field exists
+            stream_key = details.get("stream_key") or extract_stream_key_from_stream_url(stream_url)
+            if not stream_key:
+                # If we couldn't extract a key, we will still use stream_url as the RTMP target
+                # (the full stream_url frequently contains the key already).
+                logger.info("No separate stream_key available for id=%s; using stream_url as target", live_id)
             entry = {
                 "id": live_id,
-                "stream_url": details.get("stream_url") or details.get("secure_stream_url"),
-                "stream_key": details.get("stream_key"),
+                "stream_url": stream_url,
+                "stream_key": stream_key,
                 "dash_preview_url": details.get("dash_preview_url"),
                 "raw": details,
             }
-            logger.info("Live #%s created: id=%s, stream_url=%s, stream_key=%s, dash_preview=%s",
-                        i, entry["stream_url"], entry["id"], entry["stream_key"], entry["dash_preview_url"])
+            logger.info(
+                "Live #%s created: id=%s, stream_url=%s, stream_key=%s, dash_preview=%s",
+                i, entry["id"], entry["stream_url"], entry["stream_key"], entry["dash_preview_url"]
+            )
             created.append(entry)
         except Exception as exc:
             logger.exception("Failed to create/fetch live #%s: %s", i, exc)
@@ -206,7 +240,6 @@ class StreamWorker:
                         break
                     if self._stderr_error.is_set():
                         logger.warning("%s: fatal error reported on stderr, restarting ffmpeg", self.name)
-                        # give ffmpeg a moment to flush/exit
                         time.sleep(0.5)
                         break
                     time.sleep(0.5)
@@ -244,7 +277,6 @@ class StreamWorker:
 
         self.process = subprocess.Popen(cmd, **popen_kwargs)
         logger.info("%s: ffmpeg started pid=%s", self.name, self.process.pid)
-        # start stderr reader thread
         threading.Thread(target=self._stderr_reader, daemon=True).start()
 
     def _stderr_reader(self):
@@ -255,13 +287,11 @@ class StreamWorker:
                 line = raw.rstrip()
                 if not line:
                     continue
-                # Only consider serious lines: ffmpeg invoked with -loglevel error usually provides error lines.
                 # Print to stdout for visibility + log as error.
                 print(f"{self.name} | {line}")
                 logger.error("%s: %s", self.name, line)
 
                 # Decide whether to treat this as a fatal error that should trigger a restart.
-                # Patterns that indicate input/network or demuxer failures are treated as fatal.
                 lower = line.lower()
                 if (
                     "error during demuxing" in lower
@@ -271,10 +301,8 @@ class StreamWorker:
                     or "error while decoding" in lower
                     or "error writing trailer" in lower
                 ):
-                    # signal worker to restart ffmpeg
                     self._stderr_error.set()
         except Exception:
-            # reader may fail if process closes; ignore
             pass
 
     def _terminate_process(self):
@@ -313,7 +341,6 @@ class StreamWorker:
         except Exception:
             logger.exception("%s: error while terminating process", self.name)
         finally:
-            # close stderr to release reader loop
             try:
                 if self.process and self.process.stderr:
                     self.process.stderr.close()
@@ -354,17 +381,21 @@ def main():
         stream_key = entry.get("stream_key")
         dash = entry.get("dash_preview_url")
 
+        # Build target: prefer full stream_url if present, otherwise use rtmps endpoint + key (if we have one)
         if stream_url:
             target = stream_url
+            # if we extracted stream_key earlier, keep it in metadata (for logging)
+            stream_key_used = stream_key or extract_stream_key_from_stream_url(stream_url)
         elif stream_key:
             target = f"rtmps://live-api-s.facebook.com:443/rtmp/{stream_key}"
+            stream_key_used = stream_key
         else:
             logger.error("No stream_url or stream_key for id=%s. Skipping.", live_id)
             continue
 
         source = SOURCES[i % len(SOURCES)]
-        logger.info("Mapping #%d: id=%s -> source=%s -> target=%s (dash=%s)", i + 1, live_id, source, target, dash)
-        pairs.append({"id": live_id, "source": source, "target": target, "stream_key": stream_key, "dash": dash})
+        logger.info("Mapping #%d: id=%s -> source=%s -> target=%s (dash=%s) key=%s", i + 1, live_id, source, target, dash, stream_key_used)
+        pairs.append({"id": live_id, "source": source, "target": target, "stream_key": stream_key_used, "dash": dash})
 
     if not pairs:
         logger.error("No valid pairs to stream. Exiting.")
@@ -379,7 +410,7 @@ def main():
 
     logger.info("Workers started. Summary:")
     for idx, p in enumerate(pairs, start=1):
-        logger.info("Stream #%d: id=%s, source=%s, target=%s, dash=%s", idx, p["id"], p["source"], p["target"], p["dash"])
+        logger.info("Stream #%d: id=%s, source=%s, target=%s, stream_key=%s, dash=%s", idx, p["id"], p["source"], p["target"], p["stream_key"], p["dash"])
 
     # Wait until all workers exit (they only exit on stop request or if restart limit reached)
     try:
