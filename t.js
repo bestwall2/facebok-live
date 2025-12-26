@@ -332,43 +332,57 @@ async function startFFmpeg(item, force = false) {
   const cmd = ffmpeg(item.source)
     .inputOptions([
       "-hide_banner",
-      "-loglevel", "error",
-      "-re",
-      "-fflags", "+genpts+igndts+discardcorrupt",
-      "-rw_timeout", "20000000",
-      "-timeout", "20000000",
+      "-loglevel", "warning",
+
+      // HLS stability
+      "-fflags", "+genpts+igndts+nobuffer",
+      "-flags", "low_delay",
+
+      "-rw_timeout", "3000000",
+      "-timeout", "3000000",
+
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_at_eof", "1",
-      "-reconnect_delay_max", "10",
+      "-reconnect_delay_max", "5",
+
       "-thread_queue_size", "4096",
-      "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+
+      // IMPORTANT: use user_agent instead of headers
+      "-user_agent", "Mozilla/5.0"
     ])
-    .videoCodec("libx264")       // Single video codec
-    .audioCodec("aac")            // Single audio codec
-    .audioChannels(2)             // Stereo
-    .audioFrequency(48000)        // 48 kHz sample rate
-    .audioBitrate("128k")         // Audio bitrate
+
+    // Explicit stream mapping (VERY IMPORTANT)
     .outputOptions([
-      // Video settings optimized for Facebook
+      "-map", "0:v:0",
+      "-map", "0:a:0?",
+
+      // VIDEO
+      "-c:v", "libx264",
       "-preset", "veryfast",
-      "-profile:v", "main",
-      "-level", "4.1",
+      "-profile:v", "high",
+      "-level", "4.2",
       "-pix_fmt", "yuv420p",
       "-r", "30",
-      "-g", "60",          // Keyframe every 2 seconds
+      "-g", "60",
       "-keyint_min", "60",
       "-sc_threshold", "0",
-      "-b:v", "4500k",     // Facebook recommends 4000–6000k for 1080p
+      "-b:v", "4500k",
       "-maxrate", "4500k",
       "-bufsize", "9000k",
       "-x264opts", "nal-hrd=cbr:force-cfr=1",
 
-      // Facebook RTMPS / FLV settings
+      // AUDIO
+      "-c:a", "aac",
+      "-b:a", "128k",
+      "-ac", "2",
+      "-ar", "48000",
+
+      // FACEBOOK
       "-f", "flv",
       "-rtmp_live", "live",
-      "-max_muxing_queue_size", "2048",
-      "-flvflags", "no_duration_filesize"
+      "-flvflags", "no_duration_filesize",
+      "-max_muxing_queue_size", "2048"
     ])
     .output(cache.stream_url)
     .on("start", (commandLine) => {
