@@ -334,6 +334,8 @@ async  function startFFmpeg(item, force = false) {
 
 const cmd = ffmpeg(item.source)
     .inputOptions([
+      "-hide_banner",
+      "-loglevel", "error",
       "-re",
       "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
       "-fflags", "+genpts+igndts+discardcorrupt",
