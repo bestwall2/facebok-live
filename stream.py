@@ -120,7 +120,7 @@ def create_unpublished_live(access_token: str, title: str = "") -> Dict:
 
 
 def fetch_live_details(live_id: str, access_token: str) -> Dict:
-    fields = "id,stream_url,secure_stream_url,stream_key,dash_preview_url"
+    fields = "id,stream_url,secure_stream_url,dash_preview_url"
     url = f"{FB_GRAPH_BASE}/{live_id}"
     params = {
         "access_token": access_token,
@@ -154,17 +154,17 @@ def create_multiple_lives(count: int, access_token: str) -> List[Dict]:
             details = fetch_live_details(live_id, access_token)
             stream_url = details.get("stream_url") or details.get("secure_stream_url")
             # stream_key might be provided separately in some API versions
-            stream_key = details.get("stream_key")
+           
             dash_preview_url = details.get("dash_preview_url")
             entry = {
                 "id": live_id,
                 "stream_url": stream_url,
-                "stream_key": stream_key,
+                "stream_key": stream_url,
                 "dash_preview_url": dash_preview_url,
                 "raw": details,
             }
-            logger.info("Live #%s created: id=%s, stream_url=%s, stream_key=%s, dash_preview=%s",
-                        i, live_id, stream_url, stream_key, dash_preview_url)
+            logger.info("Live #%s created: id=%s, stream_url=%s,  dash_preview=%s",
+                        i, live_id, stream_url, dash_preview_url)
             created.append(entry)
         except Exception as e:
             logger.exception("Failed to create/fetch live #%s: %s", i, e)
