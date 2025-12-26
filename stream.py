@@ -44,7 +44,7 @@ except Exception:
 # ========== CONFIG ==========
 SOURCES_ENV = os.getenv(
     "SOURCES",
-    "http://185.226.172.11:8080/mo3ad/mo3ad1.m3u8,http://185.226.172.11:8080/mo3ad/mo3ad2.m3u8,http://185.226.172.11:8080/mo3ad/mo3ad3.m3u8",
+    "http://xvip.pro/live/49856858659/50765268085/473529.ts,http://xvip.pro/live/49856858659/50765268085/473529.ts,http://xvip.pro/live/49856858659/50765268085/473529.ts",
 )
 SOURCES = [s.strip() for s in SOURCES_ENV.split(",") if s.strip()]
 
