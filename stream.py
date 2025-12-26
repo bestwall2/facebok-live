@@ -1,3 +1,7 @@
+
+
+
+
 #!/usr/bin/env python3
 """
 Resilient multi-streamer (updated to handle Graph API that does not return
@@ -11,6 +15,7 @@ Changes in this version:
 - Logs clearly when the key is extracted from stream_url and prints id/dash/stream_url/key.
 - Keeps robust StreamWorker behavior (auto-restart on problematic ffmpeg errors).
 - ffmpeg loglevel remains `error` and only error lines are printed.
+- Adds reconnect=1 query parameter to RTMP/RTMPS output targets when missing.
 
 Usage:
 - Set ACCESS_TOKEN in env.
@@ -28,7 +33,7 @@ import logging
 import subprocess
 import threading
 from typing import List, Dict, Optional
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
 try:
     import requests
@@ -43,10 +48,11 @@ SOURCES_ENV = os.getenv(
 )
 SOURCES = [s.strip() for s in SOURCES_ENV.split(",") if s.strip()]
 
+# Prefer not to include a default access token in the code; require it via env.
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "EAAKXMxkBFCIBQS3eXZAF2NvLNx2wuUs4BSWeFStF24bttj6NXuuGxnpYcGMbs0RQXu1z8hsZA2grHU5hNlNp4EqvvynPSc9dSnXVc1kTJZADlsyymdxNxU4682JV93Q3PmhZC3WmDpouokB8jAjG0OwOM836DG28T9BDZBlpZAGsCRY2qeFGkMCPe7xyZC6ZC2sFiEAZD")
 FB_API_VERSION = os.getenv("FB_API_VERSION", "v24.0")
 FB_GRAPH_BASE = f"https://graph.facebook.com/{FB_API_VERSION}"
-CREATE_COUNT = int(os.getenv("CREATE_COUNT", "1"))
+CREATE_COUNT = int(os.getenv("CREATE_COUNT", "3"))
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "/usr/bin/ffmpeg")
 
 # Restart/backoff settings
@@ -92,8 +98,38 @@ def extract_stream_key_from_stream_url(stream_url: Optional[str]) -> Optional[st
         logger.debug("Failed to parse stream_url for key extraction: %s", stream_url, exc_info=True)
     return None
 
+# ========== UTIL: ensure reconnect flag in RTMP/RTMPS target URL ==========
+def ensure_reconnect_in_target(target: str) -> str:
+    """
+    For RTMP/RTMPS targets, append a `reconnect=1` query parameter if not already present.
+    This helps some streaming setups / proxies understand the desired reconnect behavior.
+    If the target is not an rtmp(s) URL or already contains reconnect, return as-is.
+    """
+    if not target:
+        return target
+    try:
+        parsed = urlparse(target)
+        scheme = (parsed.scheme or "").lower()
+        if scheme in ("rtmp", "rtmps"):
+            qs = parse_qs(parsed.query, keep_blank_values=True)
+            if "reconnect" not in qs:
+                qs["reconnect"] = ["1"]
+                # flatten to single-value keys for urlencode
+                flat = {k: v[0] for k, v in qs.items()}
+                new_query = urlencode(flat)
+                new_parsed = parsed._replace(query=new_query)
+                new_target = urlunparse(new_parsed)
+                logger.info("Added reconnect=1 to RTMP target: %s -> %s", target, new_target)
+                return new_target
+    except Exception:
+        logger.debug("Failed to append reconnect to target: %s", target, exc_info=True)
+    return target
+
 # ========== FFMPEG CMD ==========
 def build_ffmpeg_cmd(source: str, rtmp_target: str) -> List[str]:
+    # Ensure reconnect flag is present on RTMP/RTMPS targets
+    rtmp_target = ensure_reconnect_in_target(rtmp_target)
+
     # Using conservative/robust options for network/HLS inputs and tolerating corrupt frames.
     return [
         FFMPEG_PATH,
