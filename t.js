@@ -320,7 +320,7 @@ async  function startFFmpeg(item, force = false) {
   
   // Wait before starting FFmpeg
 
-    log(`⏳ Waiting ${delayMs}ms before starting ${item.name}`);
+    log(`⏳ Waiting 5s before starting ${item.name}`);
     await sleep(5000);
   
   log(`▶ STARTING ${item.name} (key age: ${((Date.now() - cache.creationTime)/1000/60/60).toFixed(2)} hours)`);
