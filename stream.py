@@ -1,23 +1,16 @@
 #!/usr/bin/env python3
 """
-Stream a single source to 3 Facebook live-stream endpoints that are created
-via the Graph API as unpublished live videos.
+Stream each source to its own Facebook live endpoint.
 
-What this script does:
-- Creates N unpublished live videos via Graph API (/me/live_videos?published=false)
-- Reads each returned live-video ID and fetches fields: stream_url, stream_key, dash_preview_url
-- Starts one ffmpeg process per live video using the same SOURCE
-- Logs detailed information about API responses, IDs, dash preview URLs and stream keys
-- Handles SIGINT/SIGTERM for a clean shutdown of ffmpeg processes
-
-Requirements:
-- Python 3.7+
-- requests library: pip install requests
-
-Usage:
-- Export your Facebook access token in env var ACCESS_TOKEN or set ACCESS_TOKEN below.
-- Adjust SOURCE and FFMPEG_PATH as needed.
-- Run: python3 stream_fb_multi.py
+Modifications:
+- Each created live video (stream key) is paired with its own source URL.
+  SOURCES can be provided via the environment variable `SOURCES` as a comma-separated list.
+  If the number of SOURCES differs from CREATE_COUNT we cycle the list.
+- FFmpeg logging reduced to only show errors (ffmpeg `-loglevel error`).
+  The stderr reader prints/logs only lines that appear to be errors.
+- ACCESS_TOKEN must be provided via environment variable ACCESS_TOKEN (no default token in file).
+- Additional info is logged: created live ids, dash preview URLs, stream keys, and the mapping
+  between sources and targets.
 """
 
 import os
@@ -26,26 +19,28 @@ import time
 import signal
 import logging
 import subprocess
-from typing import List, Dict, Optional
+from typing import List, Dict
 
 try:
     import requests
-except Exception as e:
+except Exception:
     print("Missing dependency 'requests'. Install with: pip install requests")
     raise
 
 # ================== CONFIG ==================
-# Single source to stream to all created live videos
-SOURCE = os.getenv("SOURCE", "http://185.226.172.11:8080/mo3ad/mo3ad1.m3u8")
+# Provide sources as comma-separated list via env var SOURCES.
+# Example: export SOURCES="http://source1.m3u8,http://source2.m3u8,http://source3.m3u8"
+SOURCES_ENV = os.getenv("SOURCES", "http://185.226.172.11:8080/mo3ad/mo3ad1.m3u8,http://185.226.172.11:8080/mo3ad/mo3ad2.m3u8,http://185.226.172.11:8080/mo3ad/mo3ad3.m3u8")
+SOURCES = [s.strip() for s in SOURCES_ENV.split(",") if s.strip()]
 
-# Facebook access token (user or page token with live_video permission)
+# Facebook access token (must be set in environment)
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "EAAKXMxkBFCIBQXuVhGhiDHmzP94DK2mp0BQQZC7Jel2ybOiDg99yKKTIFZCE8PmfmgaLIvBODGgISEqy8SZCMqjYKw7ZBb1oWZCtJj9t97jssSWBkAOp5xdYwVtzQ9skg1uKEEkxZCpWw3XWZCMhMqlpxZC5JxkemvLvBACFFwhbvRvh5mnOTRn52KkyFUcjy4GHnl9TwLqv0igqOUutjZBl1HuIZD")
 
 # Graph API base and version
 FB_API_VERSION = os.getenv("FB_API_VERSION", "v24.0")
 FB_GRAPH_BASE = f"https://graph.facebook.com/{FB_API_VERSION}"
 
-# How many unpublished live videos to create (3 per request)
+# How many unpublished live videos to create
 CREATE_COUNT = int(os.getenv("CREATE_COUNT", "3"))
 
 # Path to ffmpeg binary
@@ -59,11 +54,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger("fb_streamer")
 
-# ffmpeg common options (kept simple and reliable)
+# ffmpeg command builder. Loglevel set to 'error' so ffmpeg itself only outputs errors.
 def build_ffmpeg_cmd(source: str, rtmp_target: str) -> List[str]:
     return [
         FFMPEG_PATH,
-        "-loglevel", "warning",
+        "-loglevel", "error",   # only errors from ffmpeg
         "-re",
         "-fflags", "+genpts+igndts+nobuffer",
         "-flags", "low_delay",
@@ -102,15 +97,10 @@ def build_ffmpeg_cmd(source: str, rtmp_target: str) -> List[str]:
 
 # ================== Facebook Graph API helpers ==================
 def create_unpublished_live(access_token: str, title: str = "") -> Dict:
-    """
-    Create an unpublished live video. Returns JSON response (should contain 'id').
-    We call POST /me/live_videos with published=false. If your token requires a page
-    context, use /{page-id}/live_videos instead (not implemented here).
-    """
     url = f"{FB_GRAPH_BASE}/me/live_videos"
     params = {
         "access_token": access_token,
-        "published": "false",  # request an unpublished live video
+        "published": "false",
     }
     if title:
         params["title"] = title
@@ -130,10 +120,7 @@ def create_unpublished_live(access_token: str, title: str = "") -> Dict:
 
 
 def fetch_live_details(live_id: str, access_token: str) -> Dict:
-    """
-    Fetch stream_url, stream_key, dash_preview_url and other useful fields for a created live video.
-    """
-    fields = "id,stream_url,secure_stream_url,dash_preview_url"
+    fields = "id,stream_url,secure_stream_url,stream_key,dash_preview_url"
     url = f"{FB_GRAPH_BASE}/{live_id}"
     params = {
         "access_token": access_token,
@@ -155,10 +142,6 @@ def fetch_live_details(live_id: str, access_token: str) -> Dict:
 
 
 def create_multiple_lives(count: int, access_token: str) -> List[Dict]:
-    """
-    Create `count` unpublished live videos and collect their details.
-    Returns list of dicts containing at least: id, stream_url, stream_key, dash_preview_url
-    """
     created = []
     for i in range(1, count + 1):
         title = f"AutoStream #{i} - created by script"
@@ -168,10 +151,9 @@ def create_multiple_lives(count: int, access_token: str) -> List[Dict]:
             if not live_id:
                 logger.error("No 'id' in create response: %s", created_resp)
                 raise RuntimeError("Missing id in create response")
-            # fetch additional details
             details = fetch_live_details(live_id, access_token)
-            # Some Graph versions return "stream_url" containing RTMP + key; others return "stream_key"
             stream_url = details.get("stream_url") or details.get("secure_stream_url")
+            # stream_key might be provided separately in some API versions
             stream_key = details.get("stream_key")
             dash_preview_url = details.get("dash_preview_url")
             entry = {
@@ -186,29 +168,27 @@ def create_multiple_lives(count: int, access_token: str) -> List[Dict]:
             created.append(entry)
         except Exception as e:
             logger.exception("Failed to create/fetch live #%s: %s", i, e)
-            # continue to next so we attempt to create remaining streams
     return created
-
 
 # ================== STREAM PROCESS MANAGEMENT ==================
 ffmpeg_processes: List[subprocess.Popen] = []
 
 
-def start_ffmpeg_for_targets(source: str, targets: List[str]) -> None:
+def start_ffmpeg_for_pairs(pairs: List[Dict[str, str]]) -> None:
     """
-    Start ffmpeg processes streaming `source` to each `target` (rtmp/rtmps URL).
-    We capture stderr for logging and start processes in their own process groups.
+    Start ffmpeg processes for each dict in pairs which must contain 'source' and 'target'.
+    Only ffmpeg stderr lines that appear to be errors are printed/logged.
     """
-    for idx, target in enumerate(targets, start=1):
+    for idx, pair in enumerate(pairs, start=1):
+        source = pair["source"]
+        target = pair["target"]
         cmd = build_ffmpeg_cmd(source, target)
-        logger.info("Starting ffmpeg #%d -> %s", idx, target)
-        # Start in new process group so termination is easier
+        logger.info("Starting ffmpeg #%d: source=%s -> target=%s", idx, source, target)
         popen_kwargs = {
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.PIPE,
             "bufsize": 1,
             "universal_newlines": True,
-            # use preexec_fn=os.setsid on POSIX to create new process group
         }
         if os.name != "nt":
             popen_kwargs["preexec_fn"] = os.setsid
@@ -216,7 +196,6 @@ def start_ffmpeg_for_targets(source: str, targets: List[str]) -> None:
             popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
         p = subprocess.Popen(cmd, **popen_kwargs)
         ffmpeg_processes.append(p)
-        # Start a thread to read stderr lines
         _start_stderr_reader(p, f"ffmpeg#{idx}")
 
 
@@ -229,12 +208,17 @@ def _start_stderr_reader(proc: subprocess.Popen, name: str):
         try:
             for line in proc.stderr:
                 line = line.rstrip()
-                if line:
-                    # Use debug level for verbose ffmpeg output, info for notable lines
-                    logger.debug("%s: %s", name, line)
-                    # Also print some lines to stdout to help interactive monitoring
+                if not line:
+                    continue
+                # Print/log only lines that look like errors.
+                # ffmpeg is invoked with -loglevel error so typically only error lines appear,
+                # but this also guards against unexpected verbose output.
+                if "error" in line.lower() or line.startswith("Error"):
+                    # Print to stdout for visibility and log as error
                     print(f"{name} | {line}")
+                    logger.error("%s: %s", name, line)
         except Exception:
+            # Reader can fail when process exits; ignore
             pass
 
     t = threading.Thread(target=reader, daemon=True)
@@ -283,74 +267,71 @@ def terminate_all_processes():
 def _signal_handler(signum, frame):
     logger.info("Received signal %s - shutting down", signum)
     terminate_all_processes()
-    # Let the signal kill or exit gracefully
     sys.exit(0)
 
 
 signal.signal(signal.SIGINT, _signal_handler)
 signal.signal(signal.SIGTERM, _signal_handler)
 
-
 # ================== MAIN ==================
 def main():
     if not ACCESS_TOKEN:
-        logger.error("ACCESS_TOKEN is required. Set environment variable ACCESS_TOKEN or modify the script.")
+        logger.error("ACCESS_TOKEN is required. Set environment variable ACCESS_TOKEN.")
         sys.exit(1)
 
-    logger.info("Starting creation of %d unpublished live videos", CREATE_COUNT)
+    if not SOURCES:
+        logger.error("No sources provided. Set environment variable SOURCES.")
+        sys.exit(1)
+
+    logger.info("Creating %d unpublished live videos...", CREATE_COUNT)
     created = create_multiple_lives(CREATE_COUNT, ACCESS_TOKEN)
 
     if not created:
         logger.error("No live videos were created. Exiting.")
         sys.exit(1)
 
-    # Build rtmp/rtmps targets from returned details.
+    # Build targets and pair each target with a source.
     targets = []
-    for i, entry in enumerate(created, start=1):
+    pairs = []
+
+    # If number of sources differs from CREATE_COUNT, cycle through sources.
+    for i, entry in enumerate(created):
         live_id = entry.get("id")
         stream_url = entry.get("stream_url")
         stream_key = entry.get("stream_key")
+        dash = entry.get("dash_preview_url")
 
-        # Prefer full stream_url if provided; otherwise build using rtmps + stream_key
         if stream_url:
             target = stream_url
         elif stream_key:
-            # standard facebook rtmps endpoint
             target = f"rtmps://live-api-s.facebook.com:443/rtmp/{stream_key}"
         else:
-            logger.error("No stream_url or stream_key for id=%s. Skipping this target.", live_id)
+            logger.error("No stream_url or stream_key for id=%s. Skipping.", live_id)
             continue
 
-        logger.info("Target #%d -> id=%s target=%s dash_preview=%s", i, live_id, target, entry.get("dash_preview_url"))
-        targets.append(target)
+        # pick a source (cycle if needed)
+        source = SOURCES[i % len(SOURCES)]
+        logger.info("Mapping: live_id=%s -> source=%s -> target=%s (dash=%s)", live_id, source, target, dash)
+        pairs.append({"source": source, "target": target, "id": live_id, "dash": dash, "stream_key": stream_key})
 
-    if not targets:
-        logger.error("No valid RTMP targets to stream to. Exiting.")
+    if not pairs:
+        logger.error("No valid pairs to stream. Exiting.")
         sys.exit(1)
 
-    # Start ffmpeg processes (one per target)
-    start_ffmpeg_for_targets(SOURCE, targets)
+    # Start ffmpeg processes, one per pair (each pair maps to a single stream key and source)
+    start_ffmpeg_for_pairs(pairs)
 
-    # Print summary (IDs, keys, dash URLs)
-    logger.info("Summary of created live videos:")
-    for idx, entry in enumerate(created, start=1):
-        logger.info(
-            "Live #%d: id=%s, stream_url=%s, stream_key=%s, dash_preview=%s",
-            idx,
-            entry.get("id"),
-            entry.get("stream_url"),
-            entry.get("stream_key"),
-            entry.get("dash_preview_url"),
-        )
+    # Summary log
+    logger.info("Summary of created live videos and mappings:")
+    for idx, p in enumerate(pairs, start=1):
+        logger.info("Stream #%d: id=%s, source=%s, target=%s, stream_key=%s, dash=%s",
+                    idx, p.get("id"), p.get("source"), p.get("target"), p.get("stream_key"), p.get("dash"))
 
     # Keep main thread alive while ffmpeg processes run
     try:
         while True:
-            still_running = False
-            for p in ffmpeg_processes:
-                if p.poll() is None:
-                    still_running = True
-            if not still_running:
+            any_running = any(p.poll() is None for p in ffmpeg_processes)
+            if not any_running:
                 logger.info("All ffmpeg processes have exited.")
                 break
             time.sleep(1)
