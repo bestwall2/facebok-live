@@ -46,7 +46,7 @@ SOURCES = [s.strip() for s in SOURCES_ENV.split(",") if s.strip()]
 ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "EAAKXMxkBFCIBQXuVhGhiDHmzP94DK2mp0BQQZC7Jel2ybOiDg99yKKTIFZCE8PmfmgaLIvBODGgISEqy8SZCMqjYKw7ZBb1oWZCtJj9t97jssSWBkAOp5xdYwVtzQ9skg1uKEEkxZCpWw3XWZCMhMqlpxZC5JxkemvLvBACFFwhbvRvh5mnOTRn52KkyFUcjy4GHnl9TwLqv0igqOUutjZBl1HuIZD")
 FB_API_VERSION = os.getenv("FB_API_VERSION", "v24.0")
 FB_GRAPH_BASE = f"https://graph.facebook.com/{FB_API_VERSION}"
-CREATE_COUNT = int(os.getenv("CREATE_COUNT", "3"))
+CREATE_COUNT = int(os.getenv("CREATE_COUNT", "2"))
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "/usr/bin/ffmpeg")
 
 # Restart/backoff settings
