@@ -323,28 +323,18 @@ function startFFmpeg(item, force = false) {
 
   const timeout = setTimeout(() => controller.abort(), 5000);
 
-  const cmd = ffmpeg(item.source)
+const cmd = ffmpeg(item.source)
     .inputOptions([
-      "-headers",
-      "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36\r\n",
-      "-hide_banner",
-      "-loglevel", "error",
       "-re",
-      "-fflags", "+genpts+igndts+discardcorrupt+fastseek",
-      "-flags", "+low_delay+global_header",
-      "-avioflags", "direct",
-      "-max_error_rate", "1.0",
-      "-seekable", "0",
-      "-correct_ts_overflow", "1",
+      "-headers", "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+      "-fflags", "+genpts+igndts+discardcorrupt",
       "-rw_timeout", "20000000",
       "-timeout", "20000000",
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "10",
-      "-analyzeduration", "20000000",
-      "-probesize", "20000000",
-      "-thread_queue_size", "4096",
+      "-thread_queue_size", "4096"
     ])
     .videoCodec("libx264")
     .audioCodec("aac")
@@ -352,42 +342,28 @@ function startFFmpeg(item, force = false) {
     .audioFrequency(44100)
     .audioBitrate("128k")
     .outputOptions([
-      // ===== VIDEO ENCODING (FACEBOOK SAFE) =====
       "-c:v", "libx264",
       "-preset", "veryfast",
       "-profile:v", "main",
       "-level", "4.1",
       "-pix_fmt", "yuv420p",
-    
-      // ===== FRAME TIMING =====
       "-r", "30",
       "-g", "60",
       "-keyint_min", "60",
       "-sc_threshold", "0",
-    
-      // ===== STRICT BITRATE CONTROL (NO CRF) =====
       "-b:v", "4500k",
       "-maxrate", "4500k",
       "-bufsize", "9000k",
-    
-      // ===== X264 STABILITY =====
       "-x264opts", "nal-hrd=cbr:force-cfr=1",
-    
-      // ===== AUDIO (FACEBOOK REQUIRED) =====
+  
       "-c:a", "aac",
       "-b:a", "128k",
       "-ac", "2",
       "-ar", "48000",
-    
-      // ===== OUTPUT FORMAT =====
+  
       "-f", "flv",
       "-rtmp_live", "live",
-    
-      // ===== MUXING SAFETY =====
-      "-max_muxing_queue_size", "2048",
-    
-      // ===== REMOVE TIMING TRAPS =====
-      "-fflags", "+genpts"
+      "-max_muxing_queue_size", "2048"
     ])
     .output(cache.stream_url)
     .on("start", (commandLine) => {
