@@ -298,40 +298,6 @@ function sleep(ms) {
 
 /* ================= FFMPEG WITH ENHANCED BUFFERING ================= */
 
-async  function startFFmpeg(item, force = false) {
-  const cache = streamCache.get(item.id);
-  if (!cache) {
-    log(`❌ No cache for ${item.name}, cannot start`);
-    return;
-  }
-
-  if (activeStreams.has(item.id) && !force) {
-    log(`⚠️ ${item.name} is already running, skipping`);
-    return;
-  }
-
-  const timeUntilRotation = CONFIG.rotationInterval - (Date.now() - cache.creationTime);
-  if (timeUntilRotation <= 0) {
-    log(`⚠️ ${item.name} has expired key (${((Date.now() - cache.creationTime)/1000/60/60).toFixed(2)} hours old), rotating before starting`);
-    rotateStreamKey(item);
-    return;
-  }
-
-  
-  // Wait before starting FFmpeg
-
-    log(`⏳ Waiting 5s before starting ${item.name}`);
-    await sleep(5000);
-  
-  log(`▶ STARTING ${item.name} (key age: ${((Date.now() - cache.creationTime)/1000/60/60).toFixed(2)} hours)`);
-  serverStates.set(item.id, "starting");
-
-  if (restartTimers.has(item.id)) {
-    clearTimeout(restartTimers.get(item.id));
-    restartTimers.delete(item.id);
-  }
-
-
 async function startFFmpeg(item, force = false) {
   const cache = streamCache.get(item.id);
   if (!cache) {
