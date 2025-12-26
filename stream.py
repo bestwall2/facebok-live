@@ -1,13 +1,23 @@
 #!/usr/bin/env python3
 """
-Simple, robust FFmpeg streamer for two sources -> two RTMPS outputs.
+Stream a single source to 3 Facebook live-stream endpoints that are created
+via the Graph API as unpublished live videos.
 
-Features:
-- Starts two ffmpeg processes (one per source).
-- Captures and logs ffmpeg stderr output.
-- Handles SIGINT / SIGTERM for clean shutdown.
-- Restarts a stream automatically if ffmpeg exits unexpectedly (with backoff).
-- Uses process groups so all child processes are terminated on shutdown.
+What this script does:
+- Creates N unpublished live videos via Graph API (/me/live_videos?published=false)
+- Reads each returned live-video ID and fetches fields: stream_url, stream_key, dash_preview_url
+- Starts one ffmpeg process per live video using the same SOURCE
+- Logs detailed information about API responses, IDs, dash preview URLs and stream keys
+- Handles SIGINT/SIGTERM for a clean shutdown of ffmpeg processes
+
+Requirements:
+- Python 3.7+
+- requests library: pip install requests
+
+Usage:
+- Export your Facebook access token in env var ACCESS_TOKEN or set ACCESS_TOKEN below.
+- Adjust SOURCE and FFMPEG_PATH as needed.
+- Run: python3 stream_fb_multi.py
 """
 
 import os
@@ -16,34 +26,41 @@ import time
 import signal
 import logging
 import subprocess
-import threading
+from typing import List, Dict, Optional
+
+try:
+    import requests
+except Exception as e:
+    print("Missing dependency 'requests'. Install with: pip install requests")
+    raise
 
 # ================== CONFIG ==================
-SOURCE_1 = "http://185.226.172.11:8080/mo3ad/mo3ad1.m3u8"
-SOURCE_2 = "http://185.226.172.11:8080/mo3ad/mo3ad2.m3u8"
+# Single source to stream to all created live videos
+SOURCE = os.getenv("SOURCE", "http://185.226.172.11:8080/mo3ad/mo3ad1.m3u8")
 
-RTMPS_1 = "rtmps://live-api-s.facebook.com:443/rtmp/STREAM_KEY_1"
-RTMPS_2 = "rtmps://live-api-s.facebook.com:443/rtmp/STREAM_KEY_2"
+# Facebook access token (user or page token with live_video permission)
+ACCESS_TOKEN = os.getenv("ACCESS_TOKEN", "EAAKXMxkBFCIBQXuVhGhiDHmzP94DK2mp0BQQZC7Jel2ybOiDg99yKKTIFZCE8PmfmgaLIvBODGgISEqy8SZCMqjYKw7ZBb1oWZCtJj9t97jssSWBkAOp5xdYwVtzQ9skg1uKEEkxZCpWw3XWZCMhMqlpxZC5JxkemvLvBACFFwhbvRvh5mnOTRn52KkyFUcjy4GHnl9TwLqv0igqOUutjZBl1HuIZD")
 
-FFMPEG_PATH = "/usr/bin/ffmpeg"
+# Graph API base and version
+FB_API_VERSION = os.getenv("FB_API_VERSION", "v24.0")
+FB_GRAPH_BASE = f"https://graph.facebook.com/{FB_API_VERSION}"
 
-# How many seconds to wait before restarting a failed stream (backoff will multiply)
-RESTART_BASE_DELAY = 2
-# Maximum backoff delay (seconds) between restarts
-RESTART_MAX_DELAY = 60
-# If you want unlimited restarts set this to None, otherwise an int
-MAX_RESTARTS = None
+# How many unpublished live videos to create (3 per request)
+CREATE_COUNT = int(os.getenv("CREATE_COUNT", "3"))
 
-# ================== LOGGING ==================
+# Path to ffmpeg binary
+FFMPEG_PATH = os.getenv("FFMPEG_PATH", "/usr/bin/ffmpeg")
+
+# Logging configuration
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
-logger = logging.getLogger("streamer")
+logger = logging.getLogger("fb_streamer")
 
-# ================== FFMPEG COMMAND ==================
-def build_ffmpeg_cmd(source, rtmps):
+# ffmpeg common options (kept simple and reliable)
+def build_ffmpeg_cmd(source: str, rtmp_target: str) -> List[str]:
     return [
         FFMPEG_PATH,
         "-loglevel", "warning",
@@ -51,7 +68,6 @@ def build_ffmpeg_cmd(source, rtmps):
         "-fflags", "+genpts+igndts+nobuffer",
         "-flags", "low_delay",
         "-rw_timeout", "3000000",
-        "-timeout", "3000000",
         "-reconnect", "1",
         "-reconnect_streamed", "1",
         "-reconnect_at_eof", "1",
@@ -59,10 +75,8 @@ def build_ffmpeg_cmd(source, rtmps):
         "-thread_queue_size", "4096",
         "-user_agent", "Mozilla/5.0",
         "-i", source,
-        # Mapping
         "-map", "0:v:0",
         "-map", "0:a:0?",
-        # Video
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-profile:v", "high",
@@ -76,198 +90,276 @@ def build_ffmpeg_cmd(source, rtmps):
         "-maxrate", "4500k",
         "-bufsize", "9000k",
         "-x264opts", "nal-hrd=cbr:force-cfr=1",
-        # Audio
         "-c:a", "aac",
         "-b:a", "128k",
         "-ac", "2",
         "-ar", "48000",
-        # Output
         "-f", "flv",
         "-rtmp_live", "live",
         "-flvflags", "no_duration_filesize",
-        rtmps
+        rtmp_target,
     ]
 
-# ================== STREAM WORKER ==================
-class StreamWorker:
-    def __init__(self, name, source, rtmps):
-        self.name = name
-        self.source = source
-        self.rtmps = rtmps
-        self.process = None
-        self._stop_event = threading.Event()
-        self._reader_thread = None
-        self._restart_count = 0
+# ================== Facebook Graph API helpers ==================
+def create_unpublished_live(access_token: str, title: str = "") -> Dict:
+    """
+    Create an unpublished live video. Returns JSON response (should contain 'id').
+    We call POST /me/live_videos with published=false. If your token requires a page
+    context, use /{page-id}/live_videos instead (not implemented here).
+    """
+    url = f"{FB_GRAPH_BASE}/me/live_videos"
+    params = {
+        "access_token": access_token,
+        "published": "false",  # request an unpublished live video
+    }
+    if title:
+        params["title"] = title
+    logger.info("Creating unpublished live video: %s", title or "(no title)")
+    resp = requests.post(url, data=params, timeout=20)
+    try:
+        data = resp.json()
+    except Exception:
+        logger.error("Invalid JSON response from Graph API while creating live video. Status: %s, Text: %s",
+                     resp.status_code, resp.text)
+        raise
+    if resp.status_code >= 400 or "error" in data:
+        logger.error("Error creating live video: %s", data.get("error", data))
+        raise RuntimeError(f"Failed to create live video: {data}")
+    logger.info("Created live video id=%s", data.get("id"))
+    return data
 
-    def start(self):
-        """Start the worker loop in a background thread."""
-        t = threading.Thread(target=self._run_forever, daemon=True)
-        t.start()
 
-    def stop(self):
-        """Signal the worker to stop and terminate the running process."""
-        self._stop_event.set()
-        self._terminate_process()
+def fetch_live_details(live_id: str, access_token: str) -> Dict:
+    """
+    Fetch stream_url, stream_key, dash_preview_url and other useful fields for a created live video.
+    """
+    fields = "id,stream_url,secure_stream_url,stream_key,dash_preview_url"
+    url = f"{FB_GRAPH_BASE}/{live_id}"
+    params = {
+        "access_token": access_token,
+        "fields": fields,
+    }
+    logger.info("Fetching details for live id=%s", live_id)
+    resp = requests.get(url, params=params, timeout=20)
+    try:
+        data = resp.json()
+    except Exception:
+        logger.error("Invalid JSON response from Graph API when fetching details. Status: %s, Text: %s",
+                     resp.status_code, resp.text)
+        raise
+    if resp.status_code >= 400 or "error" in data:
+        logger.error("Error fetching live details: %s", data.get("error", data))
+        raise RuntimeError(f"Failed to fetch live details: {data}")
+    logger.info("Fetched details for id=%s: fields=%s", live_id, ", ".join(k for k in data.keys()))
+    return data
 
-    def _run_forever(self):
-        delay = RESTART_BASE_DELAY
-        while not self._stop_event.is_set():
-            logger.info("▶ Starting %s (attempt #%s)", self.name, self._restart_count + 1)
-            try:
-                self._start_process()
-                # Wait until process ends or stop event is set
-                while not self._stop_event.is_set():
-                    ret = self.process.poll()
-                    if ret is not None:
-                        logger.warning("%s exited with code %s", self.name, ret)
-                        break
-                    time.sleep(0.5)
-            except Exception as e:
-                logger.exception("%s: exception while running ffmpeg: %s", self.name, e)
-            finally:
-                self._terminate_process()
 
-            if self._stop_event.is_set():
-                break
+def create_multiple_lives(count: int, access_token: str) -> List[Dict]:
+    """
+    Create `count` unpublished live videos and collect their details.
+    Returns list of dicts containing at least: id, stream_url, stream_key, dash_preview_url
+    """
+    created = []
+    for i in range(1, count + 1):
+        title = f"AutoStream #{i} - created by script"
+        try:
+            created_resp = create_unpublished_live(access_token, title=title)
+            live_id = created_resp.get("id")
+            if not live_id:
+                logger.error("No 'id' in create response: %s", created_resp)
+                raise RuntimeError("Missing id in create response")
+            # fetch additional details
+            details = fetch_live_details(live_id, access_token)
+            # Some Graph versions return "stream_url" containing RTMP + key; others return "stream_key"
+            stream_url = details.get("stream_url") or details.get("secure_stream_url")
+            stream_key = details.get("stream_key")
+            dash_preview_url = details.get("dash_preview_url")
+            entry = {
+                "id": live_id,
+                "stream_url": stream_url,
+                "stream_key": stream_key,
+                "dash_preview_url": dash_preview_url,
+                "raw": details,
+            }
+            logger.info("Live #%s created: id=%s, stream_url=%s, stream_key=%s, dash_preview=%s",
+                        i, live_id, stream_url, stream_key, dash_preview_url)
+            created.append(entry)
+        except Exception as e:
+            logger.exception("Failed to create/fetch live #%s: %s", i, e)
+            # continue to next so we attempt to create remaining streams
+    return created
 
-            # Handle restart logic
-            self._restart_count += 1
-            if (MAX_RESTARTS is not None) and (self._restart_count > MAX_RESTARTS):
-                logger.error("%s: reached max restart limit (%s). Not restarting.", self.name, MAX_RESTARTS)
-                break
 
-            logger.info("%s: restarting in %s seconds...", self.name, delay)
-            time.sleep(delay)
-            delay = min(delay * 2, RESTART_MAX_DELAY)
+# ================== STREAM PROCESS MANAGEMENT ==================
+ffmpeg_processes: List[subprocess.Popen] = []
 
-    def _start_process(self):
-        cmd = build_ffmpeg_cmd(self.source, self.rtmps)
 
-        # Cross-platform process group creation
+def start_ffmpeg_for_targets(source: str, targets: List[str]) -> None:
+    """
+    Start ffmpeg processes streaming `source` to each `target` (rtmp/rtmps URL).
+    We capture stderr for logging and start processes in their own process groups.
+    """
+    for idx, target in enumerate(targets, start=1):
+        cmd = build_ffmpeg_cmd(source, target)
+        logger.info("Starting ffmpeg #%d -> %s", idx, target)
+        # Start in new process group so termination is easier
         popen_kwargs = {
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.PIPE,
             "bufsize": 1,
             "universal_newlines": True,
+            # use preexec_fn=os.setsid on POSIX to create new process group
         }
-        if os.name == "nt":
-            # CREATE_NEW_PROCESS_GROUP lets us send CTRL_BREAK_EVENT on Windows if needed
-            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-        else:
-            # start new process group so we can kill the whole group (ffmpeg forks)
+        if os.name != "nt":
             popen_kwargs["preexec_fn"] = os.setsid
+        else:
+            popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        p = subprocess.Popen(cmd, **popen_kwargs)
+        ffmpeg_processes.append(p)
+        # Start a thread to read stderr lines
+        _start_stderr_reader(p, f"ffmpeg#{idx}")
 
-        self.process = subprocess.Popen(cmd, **popen_kwargs)
-        logger.info("%s: ffmpeg started (pid=%s)", self.name, self.process.pid)
 
-        # Start a reader thread to print ffmpeg stderr lines (non-blocking)
-        self._reader_thread = threading.Thread(target=self._drain_stderr, daemon=True)
-        self._reader_thread.start()
+def _start_stderr_reader(proc: subprocess.Popen, name: str):
+    import threading
 
-    def _drain_stderr(self):
-        if not self.process or not self.process.stderr:
+    def reader():
+        if not proc.stderr:
             return
         try:
-            for line in self.process.stderr:
+            for line in proc.stderr:
                 line = line.rstrip()
                 if line:
-                    logger.debug("%s ffmpeg: %s", self.name, line)
+                    # Use debug level for verbose ffmpeg output, info for notable lines
+                    logger.debug("%s: %s", name, line)
+                    # Also print some lines to stdout to help interactive monitoring
+                    print(f"{name} | {line}")
         except Exception:
-            # It's normal for reading to fail when process is terminated
             pass
 
-    def _terminate_process(self):
-        if not self.process:
-            return
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
 
-        logger.info("%s: terminating ffmpeg (pid=%s)...", self.name, self.process.pid)
+
+def terminate_all_processes():
+    logger.info("Terminating all ffmpeg processes...")
+    for p in ffmpeg_processes:
         try:
+            if p.poll() is not None:
+                continue
+            logger.info("Terminating pid=%s", p.pid)
             if os.name == "nt":
-                # On Windows, try CTRL_BREAK_EVENT then kill
                 try:
-                    self.process.send_signal(signal.CTRL_BREAK_EVENT)
+                    p.send_signal(signal.CTRL_BREAK_EVENT)
                 except Exception:
                     pass
                 time.sleep(1)
-                if self.process.poll() is None:
-                    self.process.kill()
+                if p.poll() is None:
+                    p.kill()
             else:
-                # Send SIGTERM to the process group
                 try:
-                    os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                    os.killpg(os.getpgid(p.pid), signal.SIGTERM)
                 except Exception:
-                    # fallback: kill single process
                     try:
-                        self.process.terminate()
+                        p.terminate()
                     except Exception:
                         pass
-
-            # Wait briefly for exit
             try:
-                self.process.wait(timeout=5)
+                p.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                logger.warning("%s: ffmpeg did not exit, killing...", self.name)
-                try:
-                    if os.name == "nt":
-                        self.process.kill()
-                    else:
-                        os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-                except Exception:
-                    pass
-                try:
-                    self.process.wait(timeout=2)
-                except Exception:
-                    pass
+                logger.warning("Process pid=%s did not exit; killing...", p.pid)
+                if os.name == "nt":
+                    p.kill()
+                else:
+                    try:
+                        os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+                    except Exception:
+                        p.kill()
         except Exception:
-            logger.exception("%s: error while terminating ffmpeg", self.name)
-        finally:
-            # Close stderr to stop reader thread
-            try:
-                if self.process.stderr:
-                    self.process.stderr.close()
-            except Exception:
-                pass
-            self.process = None
+            logger.exception("Error while terminating process pid=%s", getattr(p, "pid", "<unknown>"))
 
-# ================== MAIN & SIGNALS ==================
-workers = []
 
-def shutdown(signum, frame):
-    logger.info("🛑 Received signal %s — stopping streams...", signum)
-    for w in workers:
-        w.stop()
+# ================== SIGNAL HANDLING ==================
+def _signal_handler(signum, frame):
+    logger.info("Received signal %s - shutting down", signum)
+    terminate_all_processes()
+    # Let the signal kill or exit gracefully
+    sys.exit(0)
 
+
+signal.signal(signal.SIGINT, _signal_handler)
+signal.signal(signal.SIGTERM, _signal_handler)
+
+
+# ================== MAIN ==================
 def main():
-    # Create workers for each stream
-    w1 = StreamWorker("Stream 1", SOURCE_1, RTMPS_1)
-    w2 = StreamWorker("Stream 2", SOURCE_2, RTMPS_2)
-    workers.extend([w1, w2])
+    if not ACCESS_TOKEN:
+        logger.error("ACCESS_TOKEN is required. Set environment variable ACCESS_TOKEN or modify the script.")
+        sys.exit(1)
 
-    # Setup signal handlers
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
+    logger.info("Starting creation of %d unpublished live videos", CREATE_COUNT)
+    created = create_multiple_lives(CREATE_COUNT, ACCESS_TOKEN)
 
-    # Start workers
-    w1.start()
-    w2.start()
+    if not created:
+        logger.error("No live videos were created. Exiting.")
+        sys.exit(1)
 
-    # Keep main thread alive until workers finish (they're daemon threads so exit on main exit)
+    # Build rtmp/rtmps targets from returned details.
+    targets = []
+    for i, entry in enumerate(created, start=1):
+        live_id = entry.get("id")
+        stream_url = entry.get("stream_url")
+        stream_key = entry.get("stream_key")
+
+        # Prefer full stream_url if provided; otherwise build using rtmps + stream_key
+        if stream_url:
+            target = stream_url
+        elif stream_key:
+            # standard facebook rtmps endpoint
+            target = f"rtmps://live-api-s.facebook.com:443/rtmp/{stream_key}"
+        else:
+            logger.error("No stream_url or stream_key for id=%s. Skipping this target.", live_id)
+            continue
+
+        logger.info("Target #%d -> id=%s target=%s dash_preview=%s", i, live_id, target, entry.get("dash_preview_url"))
+        targets.append(target)
+
+    if not targets:
+        logger.error("No valid RTMP targets to stream to. Exiting.")
+        sys.exit(1)
+
+    # Start ffmpeg processes (one per target)
+    start_ffmpeg_for_targets(SOURCE, targets)
+
+    # Print summary (IDs, keys, dash URLs)
+    logger.info("Summary of created live videos:")
+    for idx, entry in enumerate(created, start=1):
+        logger.info(
+            "Live #%d: id=%s, stream_url=%s, stream_key=%s, dash_preview=%s",
+            idx,
+            entry.get("id"),
+            entry.get("stream_url"),
+            entry.get("stream_key"),
+            entry.get("dash_preview_url"),
+        )
+
+    # Keep main thread alive while ffmpeg processes run
     try:
-        # Wait until all workers have stopped (poll every second).
         while True:
-            # If all workers have no active process and stop was requested, exit.
-            all_stopped = True
-            for w in workers:
-                if not w._stop_event.is_set():
-                    all_stopped = False
-                    break
-            if all_stopped:
+            still_running = False
+            for p in ffmpeg_processes:
+                if p.poll() is None:
+                    still_running = True
+            if not still_running:
+                logger.info("All ffmpeg processes have exited.")
                 break
             time.sleep(1)
     except KeyboardInterrupt:
-        shutdown("KeyboardInterrupt", None)
+        logger.info("KeyboardInterrupt received, shutting down.")
+    finally:
+        terminate_all_processes()
+        logger.info("Exited.")
 
-    logger.info("All streams stopped. Exiting.")
 
 if __name__ == "__main__":
     main()
