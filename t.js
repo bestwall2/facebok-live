@@ -344,7 +344,7 @@ function getUserAgent(type = "default") {
   if (type === "mobile") {
     return "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
   }
-  return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0 Safari/537.36";
+  return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
 }
 
 /* ================= SOURCE-TYPE ARG BUILDER =================
@@ -367,6 +367,13 @@ function buildInputArgsForSource(source) {
       "-reconnect_delay_max", "10",
       "-multiple_requests", "1",
       "-timeout", "10000000",
+      
+      "-fflags", "+genpts+igndts",
+      "-max_delay", "30000000",        // 30 seconds buffer
+      "-thread_queue_size", "16384",
+      "-analyzeduration", "10M",
+      "-probesize", "10M",
+      "-itsoffset", "50",
       "-i", s
     ];
   }
@@ -494,7 +501,10 @@ async function startFFmpeg(item, force = false) {
 
   // Output (minimal requested)
   const outputArgs = [
-    "-c", "copy",
+    "-c:v", "copy",
+    "-c:a", "copy"    
+    "-re",
+    "-fps_mode", "cfr",
     "-f", "flv",
     "-loglevel", "error",
     cache.stream_url
