@@ -1,11 +1,19 @@
 /******************************************************************
  * FACEBOOK MULTI STREAM MANAGER – ADVANCED (CONNECTION-GATED)
  *
- * Extended source support:
+ * Extended source support + group-restart feature:
  * - Recognizes RTMP, HLS (.m3u8), RTSP, SRT, UDP/RTP, HTTP progressive, and local files
  * - For each source type we apply a small, focused set of input options
  * - Output remains the requested minimal set:
  *     -c copy -f flv -loglevel quiet <rtmpUrl>
+ *
+ * New feature:
+ * - CONFIG.restartGroupOnTokenFailure (true/false)
+ *   If true, when any stream fails at runtime and there are other streams
+ *   created with the same token, the manager will:
+ *   1) stop the other streams that share the token,
+ *   2) wait CONFIG.crashedServerDelay,
+ *   3) restart all streams that were created by that token at once.
  *
  * The orchestration (semaphore/queue/backoff/rotation/telegram) remains.
  ******************************************************************/
@@ -27,7 +35,7 @@ const CONFIG = {
   },
   initialDelay: 50000, // 50 seconds for ALL servers initial start
   newServerDelay: 30000, // 30 seconds for NEW servers
-  crashedServerDelay: 180000, // 2 minutes for CRASHED servers
+  crashedServerDelay: 150000, // 2 minutes for CRASHED servers
   rotationInterval: 13500000, // 3:45 hours in milliseconds
 
   // Connection orchestration
@@ -39,6 +47,12 @@ const CONFIG = {
   globalFailureThreshold: 4, // failures within timeframe to trigger global cooldown
   globalFailureWindow: 60_000, // timeframe for counting failures (ms)
   globalCooldownDuration: 2 * 60_000, // ms: how long to pause all connecting on global failure
+
+  // NEW: group restart behavior (true = enabled, false = disabled)
+  // If enabled, when one stream that shares a token fails, other streams
+  // with the same token are stopped and all are restarted together after
+  // CONFIG.crashedServerDelay.
+  restartGroupOnTokenFailure: true,
 };
 
 const CACHE_FILE = "./streams_cache.json";
@@ -51,7 +65,7 @@ let activeStreams = new Map(); // child_processes
 let streamCache = new Map(); // stream_url cache WITH creationTime
 let streamStartTimes = new Map(); // track stream start times
 let streamRotationTimers = new Map(); // rotation timers
-let restartTimers = new Map(); // restart timers
+let restartTimers = new Map(); // restart timers (per-stream)
 let serverStates = new Map(); // server states
 let startupTimer = null; // for initial startup delay
 let isRestarting = false; // flag to prevent multiple restarts
@@ -64,6 +78,9 @@ const connectionHolders = new Map(); // map item.id -> { held: true } if slot is
 const perStreamAttempts = new Map(); // map item.id -> attempt count (startup failures)
 let recentStartupFailures = []; // timestamps of recent startup failures across all streams
 let globalCooldownUntil = 0; // timestamp until which new connections are paused
+
+// NEW: group restart timers keyed by token
+const groupRestartTimers = new Map(); // token -> timeout id
 
 /* ================= STABLE ID GENERATION ================= */
 
@@ -592,6 +609,7 @@ async function startFFmpeg(item, force = false) {
     if (!hadStartEvent) {
       classifyStartupFailure(item, message);
     } else {
+      // runtime crash handling will consider group restart logic
       handleStreamCrash(item, message, { runtime: true });
     }
     if (startTimeout) {
@@ -611,6 +629,7 @@ async function startFFmpeg(item, force = false) {
       ensureReleaseSlot();
       classifyStartupFailure(item, `Startup exit: ${reason}`);
     } else {
+      // runtime crash handling will consider group restart logic
       handleStreamCrash(item, `Process exited (${reason})`, { runtime: true });
     }
 
@@ -667,6 +686,12 @@ function classifyStartupFailure(item, message = "Startup failure") {
 
 /* ================= FFMPEG STOP & CRASH HANDLING ================= */
 
+/*
+  New behavior:
+  - If CONFIG.restartGroupOnTokenFailure is true, a runtime crash for a stream
+    will cause other streams that share the same token to be stopped and a
+    grouped restart will be scheduled after CONFIG.crashedServerDelay.
+*/
 function handleStreamCrash(item, reason, opts = { runtime: false }) {
   const state = serverStates.get(item.id);
 
@@ -690,6 +715,77 @@ function handleStreamCrash(item, reason, opts = { runtime: false }) {
         `Status: Will restart in ${CONFIG.crashedServerDelay / 1000} seconds`
     );
     log(`🔄 ${item.name} will restart in ${CONFIG.crashedServerDelay / 1000}s (runtime crash)`);
+
+    // If group-restart-by-token is enabled, attempt to stop sibling streams and schedule a group restart
+    if (CONFIG.restartGroupOnTokenFailure && item && item.token) {
+      const token = item.token;
+      // If a group restart is already scheduled for this token, do not schedule again
+      if (groupRestartTimers.has(token)) {
+        log(`ℹ️ Group restart already scheduled for token ${token}, skipping duplicate schedule.`);
+        // Still mark this server as restarting and stop the failed one
+        serverStates.set(item.id, "restarting");
+        stopFFmpeg(item.id);
+        return;
+      }
+
+      // Find all API items that have the same token
+      const sameTokenIds = [];
+      for (const [id, apiItem] of apiItems) {
+        if (apiItem && apiItem.token === token) {
+          sameTokenIds.push(id);
+        }
+      }
+
+      // If there's more than 1 stream with this token, we perform group stop+restart
+      if (sameTokenIds.length > 1) {
+        log(`🔁 Detected ${sameTokenIds.length} streams sharing token. Performing grouped restart for token ${token}.`);
+
+        // Stop all active streams that share the token
+        for (const id of sameTokenIds) {
+          if (activeStreams.has(id)) {
+            log(`⏹️ Stopping sibling stream ${id} (same token)`);
+            try {
+              stopFFmpeg(id, true);
+            } catch (e) {
+              log(`⚠️ Error stopping sibling ${id}: ${e.message}`);
+            }
+          }
+        }
+
+        // Clear any per-stream restart timers to avoid double restarts
+        for (const id of sameTokenIds) {
+          if (restartTimers.has(id)) {
+            clearTimeout(restartTimers.get(id));
+            restartTimers.delete(id);
+          }
+          serverStates.set(id, "restarting");
+        }
+
+        // Schedule a single grouped restart for all streams sharing this token
+        const groupTimer = setTimeout(() => {
+          log(`▶ Group restart timer fired for token ${token}. Restarting ${sameTokenIds.length} streams.`);
+          groupRestartTimers.delete(token);
+
+          for (const id of sameTokenIds) {
+            const apiItem = apiItems.get(id);
+            if (!apiItem) continue;
+            if (serverStates.get(id) === "token_error") {
+              log(`⚠️ Skipping start for ${apiItem.name} (token_error)`);
+              continue;
+            }
+            startFFmpeg(apiItem).catch(e => {
+              log(`⚠️ Error starting ${apiItem.name} during group restart: ${e && e.message}`);
+            });
+          }
+        }, CONFIG.crashedServerDelay);
+
+        groupRestartTimers.set(token, groupTimer);
+        return;
+      }
+      // otherwise fall-through to single-stream restart behavior below
+    }
+
+    // Default single-stream runtime crash behavior (no group restart or only one stream with token)
     serverStates.set(item.id, "restarting");
     stopFFmpeg(item.id);
 
@@ -839,6 +935,12 @@ async function restartSystem() {
   });
   restartTimers.clear();
   
+  // Clear group timers
+  for (const [token, t] of groupRestartTimers) {
+    clearTimeout(t);
+  }
+  groupRestartTimers.clear();
+
   streamRotationTimers.forEach((timer, id) => {
     clearTimeout(timer);
   });
@@ -1451,6 +1553,12 @@ async function gracefulShutdown() {
   streamRotationTimers.forEach((timer, id) => {
     clearTimeout(timer);
   });
+
+  // Clear group restart timers too
+  for (const [token, t] of groupRestartTimers) {
+    clearTimeout(t);
+  }
+  groupRestartTimers.clear();
 
   for (const [id] of activeStreams) {
     stopFFmpeg(id, true);
