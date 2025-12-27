@@ -362,6 +362,17 @@ function buildInputArgsForSource(source) {
   if (/\.m3u8(\?|$)/i.test(s) || lower.includes("m3u8") || lower.includes("hls")) {
     return [
       "-user_agent", getUserAgent("default"),
+
+      "-headers",
+      "Accept: */*\r\n" +
+      "Accept-Language: en-US,en;q=0.6\r\n" +
+      "Accept-Encoding: identity\r\n" +
+      "Range: bytes=0-\r\n",
+      "-referer", s, // 👈 very important (same m3u8 URL)
+      // HTTP behavior
+      "-http_persistent", "1",
+      "-http_multiple", "0",
+      
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_delay_max", "10",
