@@ -1,19 +1,23 @@
 /******************************************************************
  * FACEBOOK MULTI STREAM MANAGER – ADVANCED (CONNECTION-GATED)
  *
- * Changes made to address concurrent RTMPS startup rejections:
- * - Connection semaphore / start queue (maxConcurrentConnects)
- * - Per-stream exponential backoff and jitter for startup failures
- * - Global cooldown if too many startup failures in short time
- * - Differentiates startup rejection ("Error opening output file")
- *   vs runtime disconnect ("Error muxing a packet", "Error while writing")
- * - Releases connection slot on early failure or success
- * - Starts servers via queue on boot to avoid bursts
- * - Minimal changes to ffmpeg flags (none added, as requested)
+ * Simplified ffmpeg startup: use a minimal args array as requested:
+ * const args = [
+ *   '-re',
+ *   '-i', stream.data.input,
+ *   '-c', 'copy',
+ *   '-f', 'flv',
+ *   '-loglevel', 'quiet',
+ *   rtmpUrl
+ * ];
+ *
+ * This file replaces fluent-ffmpeg usage with child_process.spawn
+ * and preserves the connection semaphore, startup backoff, rotation,
+ * and other orchestration logic.
  ******************************************************************/
 
 import fs from "fs";
-import ffmpeg from "fluent-ffmpeg";
+import { spawn } from "child_process";
 import fetch from "node-fetch";
 import os from "os";
 import process from "process";
@@ -49,7 +53,7 @@ const CACHE_FILE = "./streams_cache.json";
 
 let systemState = "running";
 let apiItems = new Map(); // current api list with STABLE IDs
-let activeStreams = new Map(); // ffmpeg processes
+let activeStreams = new Map(); // child_processes
 let streamCache = new Map(); // stream_url cache WITH creationTime
 let streamStartTimes = new Map(); // track stream start times
 let streamRotationTimers = new Map(); // rotation timers
@@ -326,6 +330,19 @@ function jitteredBackoff(base, attempt, cap) {
 
 /* ================= FFMPEG WITH ENHANCED BUFFERING & ORCHESTRATION ================= */
 
+/*
+  The original implementation used fluent-ffmpeg and many options.
+  Per the user's request we now start ffmpeg with a minimal args array:
+
+  const args = [
+    '-re',
+    '-i', item.source,
+    '-c', 'copy',
+    '-f', 'flv',
+    '-loglevel', 'quiet',
+    cache.stream_url
+  ];
+*/
 async function startFFmpeg(item, force = false) {
   const cache = streamCache.get(item.id);
   if (!cache) {
@@ -360,58 +377,28 @@ async function startFFmpeg(item, force = false) {
   }
   // mark connecting
   serverStates.set(item.id, "connecting");
-  log(`⏳ ${item.name} is connecting (slot acquired). Waiting 5s before ffmpeg.run()...`);
+  log(`⏳ ${item.name} is connecting (slot acquired). Waiting 5s before ffmpeg.spawn()...`);
 
   // small pre-start wait to reduce tight bursts (keeps startup cadence smoother)
   await sleep(5000);
 
-  // prepare ffmpeg command
-  const cmd = ffmpeg(item.source)
-    .inputOptions([
-      "-hide_banner",
-      "-loglevel", "warning",
-      "-fflags", "+genpts+igndts+nobuffer",
-      "-flags", "low_delay",
-      "-rw_timeout", "3000000",
-      "-timeout", "3000000",
-      "-reconnect", "1",
-      "-reconnect_streamed", "1",
-      "-reconnect_at_eof", "1",
-      "-reconnect_delay_max", "5",
-      "-thread_queue_size", "4096",
-      "-user_agent", "Mozilla/5.0"
-    ])
-    .outputOptions([
-      "-map", "0:v:0",
-      "-map", "0:a:0?",
-      "-c:v", "libx264",
-      "-preset", "veryfast",
-      "-profile:v", "high",
-      "-level", "4.2",
-      "-pix_fmt", "yuv420p",
-      "-r", "30",
-      "-g", "60",
-      "-keyint_min", "60",
-      "-sc_threshold", "0",
-      "-b:v", "4500k",
-      "-maxrate", "4500k",
-      "-bufsize", "9000k",
-      "-x264opts", "nal-hrd=cbr:force-cfr=1",
-      "-c:a", "aac",
-      "-b:a", "128k",
-      "-ac", "2",
-      "-ar", "48000",
-      "-f", "flv",
-      "-rtmp_live", "live",
-      "-flvflags", "no_duration_filesize",
-      "-max_muxing_queue_size", "2048"
-    ])
-    .output(cache.stream_url);
+  // Build minimal ffmpeg args per request
+  const args = [
+    "-re",
+    "-i", item.source,
+    "-c", "copy",
+    "-f", "flv",
+    "-loglevel", "quiet",
+    cache.stream_url
+  ];
+
+  log(`▶ Spawning ffmpeg for ${item.name}: ffmpeg ${args.join(" ")}`);
 
   let startTimeout = null;
   let stabilityTimer = null;
   let hadStartEvent = false;
   let slotReleased = false;
+  let child = null;
 
   function ensureReleaseSlot() {
     if (!slotReleased) {
@@ -420,23 +407,38 @@ async function startFFmpeg(item, force = false) {
     }
   }
 
-  // connection timeout - if no 'start' in connectTimeout, treat as startup failure
+  // connection timeout - if no 'spawn' in connectTimeout, treat as startup failure
   startTimeout = setTimeout(() => {
     if (!hadStartEvent) {
       log(`❌ ${item.name} connection start timeout (${CONFIG.connectTimeout}ms). Killing process and scheduling retry.`);
       try {
-        cmd.kill("SIGKILL");
+        if (child) {
+          child.kill("SIGKILL");
+        }
       } catch (e) {}
       ensureReleaseSlot();
       classifyStartupFailure(item);
     }
   }, CONFIG.connectTimeout);
 
-  cmd.on("start", (commandLine) => {
+  try {
+    child = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+  } catch (err) {
+    log(`❌ spawn() failed for ${item.name}: ${err.message}`);
+    ensureReleaseSlot();
+    classifyStartupFailure(item, err.message);
+    return;
+  }
+
+  // Save in active streams immediately
+  activeStreams.set(item.id, child);
+
+  // 'spawn' event indicates child was forked; treat as start event
+  child.on("spawn", () => {
     hadStartEvent = true;
     streamStartTimes.set(item.id, Date.now());
     serverStates.set(item.id, "running");
-    log(`✅ FFmpeg started for ${item.name}`);
+    log(`✅ FFmpeg spawned for ${item.name} (pid=${child.pid})`);
     // schedule release slot after stability window (so we avoid many simultaneous connects completing at same instant)
     stabilityTimer = setTimeout(() => {
       ensureReleaseSlot();
@@ -449,67 +451,85 @@ async function startFFmpeg(item, force = false) {
     // reset per-stream startup attempt count on success
     perStreamAttempts.set(item.id, 0);
     startRotationTimer(item);
-  })
-  .on("error", (err) => {
-    const message = err && err.message ? err.message : String(err);
-    log(`❌ FFmpeg error for ${item.name}: ${message}`);
+  });
 
-    // If the process never passed 'start' (hadStartEvent===false) then it's a startup rejection
-    if (!hadStartEvent) {
-      ensureReleaseSlot();
-      classifyStartupFailure(item, message);
-    } else {
-      // runtime disconnect
-      handleStreamCrash(item, message, { runtime: true });
-    }
-
-    // cleanup timers
-    if (startTimeout) {
-      clearTimeout(startTimeout); startTimeout = null;
-    }
-    if (stabilityTimer) {
-      clearTimeout(stabilityTimer); stabilityTimer = null;
-    }
-  })
-  .on("end", () => {
-    log(`🔚 FFmpeg ended for ${item.name}`);
-    if (!hadStartEvent) {
-      ensureReleaseSlot();
-      classifyStartupFailure(item, "Stream ended before start (end event)");
-    } else {
-      handleStreamCrash(item, "Stream ended unexpectedly", { runtime: true });
-    }
-    if (startTimeout) {
-      clearTimeout(startTimeout); startTimeout = null;
-    }
-    if (stabilityTimer) {
-      clearTimeout(stabilityTimer); stabilityTimer = null;
-    }
-  })
-  .on("stderr", (stderrLine) => {
-    const line = stderrLine.trim();
-    if (line.length === 0) return;
-    // Log relevant lines
-    if (line.includes("buffer") || line.includes("queue") || 
-        line.includes("speed") || line.includes("bitrate") ||
-        line.includes("muxing") || line.includes("delay") ||
-        line.includes("Error opening output") ||
-        line.includes("failed") || line.includes("Connection timed out") ||
-        line.includes("Connection reset by peer") ||
-        line.includes("error while writing")) {
-      log(`📊 ${item.name} FFmpeg: ${line}`);
+  child.stderr.on("data", (chunk) => {
+    const text = String(chunk);
+    const lines = text.split(/\r?\n/);
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      // Log relevant lines
+      if (line.includes("buffer") || line.includes("queue") || 
+          line.includes("speed") || line.includes("bitrate") ||
+          line.includes("muxing") || line.includes("delay") ||
+          line.includes("Error opening output") ||
+          line.includes("failed") || line.includes("Connection timed out") ||
+          line.includes("Connection reset by peer") ||
+          line.toLowerCase().includes("error while writing") ||
+          line.toLowerCase().includes("error")) {
+        log(`📊 ${item.name} FFmpeg: ${line}`);
+      }
     }
   });
 
-  activeStreams.set(item.id, cmd);
-  try {
-    cmd.run();
-  } catch (err) {
-    // run() itself may throw synchronously for invalid args
-    log(`❌ cmd.run() failed for ${item.name}: ${err.message}`);
+  child.stdout.on("data", (chunk) => {
+    // Occasionally ffmpeg prints useful lines to stdout (depending on args/protocol)
+    const text = String(chunk);
+    if (text.trim()) {
+      // treat presence of output as indication of start if not already set
+      if (!hadStartEvent) {
+        hadStartEvent = true;
+        streamStartTimes.set(item.id, Date.now());
+        serverStates.set(item.id, "running");
+        log(`✅ FFmpeg stdout seen for ${item.name}`);
+        if (startTimeout) {
+          clearTimeout(startTimeout);
+          startTimeout = null;
+        }
+        perStreamAttempts.set(item.id, 0);
+        startRotationTimer(item);
+      }
+    }
+  });
+
+  child.on("error", (err) => {
+    const message = err && err.message ? err.message : String(err);
+    log(`❌ FFmpeg spawn error for ${item.name}: ${message}`);
     ensureReleaseSlot();
-    classifyStartupFailure(item, err.message);
-  }
+    activeStreams.delete(item.id);
+    if (!hadStartEvent) {
+      classifyStartupFailure(item, message);
+    } else {
+      handleStreamCrash(item, message, { runtime: true });
+    }
+    if (startTimeout) {
+      clearTimeout(startTimeout); startTimeout = null;
+    }
+    if (stabilityTimer) {
+      clearTimeout(stabilityTimer); stabilityTimer = null;
+    }
+  });
+
+  child.on("exit", (code, signal) => {
+    const reason = `exit code ${code}${signal ? ` signal ${signal}` : ""}`;
+    log(`🔚 FFmpeg exited for ${item.name}: ${reason}`);
+    activeStreams.delete(item.id);
+
+    if (!hadStartEvent) {
+      ensureReleaseSlot();
+      classifyStartupFailure(item, `Startup exit: ${reason}`);
+    } else {
+      handleStreamCrash(item, `Process exited (${reason})`, { runtime: true });
+    }
+
+    if (startTimeout) {
+      clearTimeout(startTimeout); startTimeout = null;
+    }
+    if (stabilityTimer) {
+      clearTimeout(stabilityTimer); stabilityTimer = null;
+    }
+  });
 }
 
 /* Classify startup failure and schedule retry with exponential backoff */
