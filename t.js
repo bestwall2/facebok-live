@@ -27,7 +27,7 @@ const CONFIG = {
   },
   initialDelay: 50000, // 50 seconds for ALL servers initial start
   newServerDelay: 30000, // 30 seconds for NEW servers
-  crashedServerDelay: 120000, // 2 minutes for CRASHED servers
+  crashedServerDelay: 180000, // 2 minutes for CRASHED servers
   rotationInterval: 13500000, // 3:45 hours in milliseconds
 
   // Connection orchestration
