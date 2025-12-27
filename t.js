@@ -1,19 +1,13 @@
 /******************************************************************
  * FACEBOOK MULTI STREAM MANAGER – ADVANCED (CONNECTION-GATED)
  *
- * Simplified ffmpeg startup: use a minimal args array as requested:
- * const args = [
- *   '-re',
- *   '-i', stream.data.input,
- *   '-c', 'copy',
- *   '-f', 'flv',
- *   '-loglevel', 'quiet',
- *   rtmpUrl
- * ];
+ * Extended source support:
+ * - Recognizes RTMP, HLS (.m3u8), RTSP, SRT, UDP/RTP, HTTP progressive, and local files
+ * - For each source type we apply a small, focused set of input options
+ * - Output remains the requested minimal set:
+ *     -c copy -f flv -loglevel quiet <rtmpUrl>
  *
- * This file replaces fluent-ffmpeg usage with child_process.spawn
- * and preserves the connection semaphore, startup backoff, rotation,
- * and other orchestration logic.
+ * The orchestration (semaphore/queue/backoff/rotation/telegram) remains.
  ******************************************************************/
 
 import fs from "fs";
@@ -328,21 +322,116 @@ function jitteredBackoff(base, attempt, cap) {
   return exp + jitter;
 }
 
-/* ================= FFMPEG WITH ENHANCED BUFFERING & ORCHESTRATION ================= */
+function getUserAgent(type = "default") {
+  // Simple user-agent selector. Extendable if needed.
+  if (type === "mobile") {
+    return "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148";
+  }
+  return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0 Safari/537.36";
+}
 
-/*
-  The original implementation used fluent-ffmpeg and many options.
-  Per the user's request we now start ffmpeg with a minimal args array:
-
-  const args = [
-    '-re',
-    '-i', item.source,
-    '-c', 'copy',
-    '-f', 'flv',
-    '-loglevel', 'quiet',
-    cache.stream_url
-  ];
+/* ================= SOURCE-TYPE ARG BUILDER =================
+   This function centralizes input-option sets per source type.
+   It returns an array of FFmpeg args that should be placed before the output args.
 */
+function buildInputArgsForSource(source) {
+  const s = String(source || "").trim();
+  const lower = s.toLowerCase();
+
+  // Detect file (local path) if it looks like a filesystem path (no scheme)
+  const isLocalFile = /^[\w\-.:\\/]+(\.\w+)?$/.test(s) && !/^[a-z]+:\/\//i.test(s);
+
+  // HLS detection
+  if (/\.m3u8(\?|$)/i.test(s) || lower.includes("m3u8") || lower.includes("hls")) {
+    return [
+      "-user_agent", getUserAgent("default"),
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "10",
+      "-multiple_requests", "1",
+      "-timeout", "10000000",
+      "-i", s
+    ];
+  }
+
+  // RTSP
+  if (lower.startsWith("rtsp://")) {
+    return [
+      "-rtsp_transport", "tcp",
+      "-stimeout", "10000000",
+      "-fflags", "+genpts+discardcorrupt",
+      "-i", s
+    ];
+  }
+
+  // SRT (srt://)
+  if (lower.startsWith("srt://")) {
+    return [
+      "-timeout", "10000000",
+      "-reconnect", "1",
+      "-fflags", "+genpts+discardcorrupt",
+      "-i", s
+    ];
+  }
+
+  // UDP/RTP (udp:// rtp://)
+  if (lower.startsWith("udp://") || lower.startsWith("rtp://")) {
+    return [
+      "-fflags", "+genpts+discardcorrupt",
+      "-i", s
+    ];
+  }
+
+  // HTTP(s) progressive (mp4, mkv served over http)
+  if (/^https?:\/\//i.test(s)) {
+    // If it looks like HLS we handled it earlier, otherwise treat as progressive/http stream
+    return [
+      "-user_agent", getUserAgent("default"),
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "10",
+      "-timeout", "10000000",
+      "-analyzeduration", "5000000",
+      "-probesize", "5000000",
+      "-fflags", "+genpts+discardcorrupt",
+      "-err_detect", "ignore_err",
+      "-i", s
+    ];
+  }
+
+  // RTMP or other scheme-less input (treat as RTMP or generic)
+  if (lower.startsWith("rtmp://") || s.startsWith("rtmps://") || !isLocalFile) {
+    return [
+      "-user_agent", getUserAgent("default"),
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "10",
+      "-timeout", "10000000",
+      "-analyzeduration", "5000000",
+      "-probesize", "5000000",
+      "-fflags", "+genpts+discardcorrupt",
+      "-err_detect", "ignore_err",
+      "-i", s
+    ];
+  }
+
+  // Local file fallback
+  if (isLocalFile) {
+    return [
+      "-re",
+      "-i", s
+    ];
+  }
+
+  // Ultimate fallback: minimal input
+  return [
+    "-re",
+    "-i", s
+  ];
+}
+
+/* ================= FFMPEG START (uses buildInputArgsForSource) ================= */
+
 async function startFFmpeg(item, force = false) {
   const cache = streamCache.get(item.id);
   if (!cache) {
@@ -380,17 +469,21 @@ async function startFFmpeg(item, force = false) {
   log(`⏳ ${item.name} is connecting (slot acquired). Waiting 5s before ffmpeg.spawn()...`);
 
   // small pre-start wait to reduce tight bursts (keeps startup cadence smoother)
-  await sleep(5000);
+ //await sleep(5000);
 
-  // Build minimal ffmpeg args per request
-  const args = [
-    "-re",
-    "-i", item.source,
+  // Build input args based on source type
+  const source = item.source || "";
+  const inputArgs = buildInputArgsForSource(source);
+
+  // Output (minimal requested)
+  const outputArgs = [
     "-c", "copy",
     "-f", "flv",
     "-loglevel", "quiet",
     cache.stream_url
   ];
+
+  const args = [...inputArgs, ...outputArgs];
 
   log(`▶ Spawning ffmpeg for ${item.name}: ffmpeg ${args.join(" ")}`);
 
@@ -474,10 +567,8 @@ async function startFFmpeg(item, force = false) {
   });
 
   child.stdout.on("data", (chunk) => {
-    // Occasionally ffmpeg prints useful lines to stdout (depending on args/protocol)
     const text = String(chunk);
     if (text.trim()) {
-      // treat presence of output as indication of start if not already set
       if (!hadStartEvent) {
         hadStartEvent = true;
         streamStartTimes.set(item.id, Date.now());
