@@ -389,7 +389,7 @@ function buildInputArgsForSource(source) {
       "-map", "0:v:0?",
       "-map", "1:v:0",
       "-map", "0:a:0?",
-      "-map", "2:
+      "-map", "2",
     ];
   }
 
