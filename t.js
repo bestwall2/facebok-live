@@ -363,17 +363,6 @@ function buildInputArgsForSource(source) {
      const proxyUrl = `https://epservers.ahmed-dikha26.workers.dev/?url=${encodeURIComponent(s)}`;
     return [
       "-user_agent", getUserAgent("default"),
-
-      "-headers",
-      "Accept: */*\r\n" +
-      "Accept-Language: en-US,en;q=0.6\r\n" +
-      "Accept-Encoding: identity\r\n" +
-      "Range: bytes=0-\r\n",
-      "-referer", s, // 👈 very important (same m3u8 URL)
-      // HTTP behavior
-      "-http_persistent", "1",
-      "-http_multiple", "0",
-      
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_delay_max", "10",
@@ -386,7 +375,7 @@ function buildInputArgsForSource(source) {
       "-analyzeduration", "10M",
       "-probesize", "10M",
       "-itsoffset", "50",
-      "-i", s
+      "-i", proxyUrl
     ];
   }
 
