@@ -496,7 +496,7 @@ async function startFFmpeg(item, force = false) {
   const outputArgs = [
     "-c", "copy",
     "-f", "flv",
-    "-loglevel", "quiet",
+    "-loglevel", "error",
     cache.stream_url
   ];
 
