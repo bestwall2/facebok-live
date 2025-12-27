@@ -367,29 +367,16 @@ function buildInputArgsForSource(source) {
       "-reconnect_streamed", "1",
       "-reconnect_delay_max", "10",
       "-multiple_requests", "1",
-      "-timeout", "10000000",
-      
-      "-fflags", "+genpts+igndts",
+      "-timeout", "30000000",
+      "reconnect_at_eof", "1",
+      "rw_timeout", "30000000",      
+      "-fflags", "+genpts+igndts+discardcorrupt+nobuffe",
       "-max_delay", "30000000",        // 30 seconds buffer
       "-thread_queue_size", "16384",
       "-analyzeduration", "10M",
       "-probesize", "10M",
       "-itsoffset", "50",
       "-i", s ,    
-      // 🖼️ IMAGE FROM URL (fallback visual)
-      "-loop", "1",
-      "-framerate", "25",
-      "-i", "https://www.shutterstock.com/image-vector/coming-soon-announcement-banner-big-600nw-2423824295.jpg",
-    
-      // 🔇 SILENT AUDIO (Facebook needs audio)
-      "-f", "lavfi",
-      "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-    
-      // MAP (always send something)
-      "-map", "0:v:0?",
-      "-map", "1:v:0",
-      "-map", "0:a:0?",
-      "-map", "2",
     ];
   }
 
@@ -468,6 +455,22 @@ function buildInputArgsForSource(source) {
     "-i", s
   ];
 }
+
+function restartFFmpegImmediately(item, reason) {
+  log(`♻️ FFmpeg auto-revive for ${item.name}`);
+  log(`Reason: ${reason}`);
+
+  stopFFmpeg(item.id, true);
+
+  setTimeout(() => {
+    if (systemState === "running") {
+      startFFmpeg(item, true).catch(e => {
+        console.error("Revive failed:", e);
+      });
+    }
+  }, 1000); // 1 second فقط
+}
+
 
 /* ================= FFMPEG START (uses buildInputArgsForSource) ================= */
 
@@ -634,7 +637,8 @@ async function startFFmpeg(item, force = false) {
       classifyStartupFailure(item, message);
     } else {
       // runtime crash handling will consider group restart logic
-      handleStreamCrash(item, message, { runtime: true });
+     // handleStreamCrash(item, message, { runtime: true });
+      restartFFmpegImmediately(item, message);
     }
     if (startTimeout) {
       clearTimeout(startTimeout); startTimeout = null;
@@ -654,7 +658,8 @@ async function startFFmpeg(item, force = false) {
       classifyStartupFailure(item, `Startup exit: ${reason}`);
     } else {
       // runtime crash handling will consider group restart logic
-      handleStreamCrash(item, `Process exited (${reason})`, { runtime: true });
+     // handleStreamCrash(item, `Process exited (${reason})`, { runtime: true });
+      restartFFmpegImmediately(item, reason);
     }
 
     if (startTimeout) {
