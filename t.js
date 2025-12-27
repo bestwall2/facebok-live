@@ -375,7 +375,21 @@ function buildInputArgsForSource(source) {
       "-analyzeduration", "10M",
       "-probesize", "10M",
       "-itsoffset", "50",
-      "-i", s
+      "-i", s ,    
+      // 🖼️ IMAGE FROM URL (fallback visual)
+      "-loop", "1",
+      "-framerate", "25",
+      "-i", "https://www.shutterstock.com/image-vector/coming-soon-announcement-banner-big-600nw-2423824295.jpg",
+    
+      // 🔇 SILENT AUDIO (Facebook needs audio)
+      "-f", "lavfi",
+      "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
+    
+      // MAP (always send something)
+      "-map", "0:v:0?",
+      "-map", "1:v:0",
+      "-map", "0:a:0?",
+      "-map", "2:
     ];
   }
 
