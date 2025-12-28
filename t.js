@@ -33,9 +33,9 @@ const CONFIG = {
     botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",
     chatId: "-1002181683719",
   },
-  initialDelay: 50000, // 50 seconds for ALL servers initial start
+  initialDelay: 20000, // 50 seconds for ALL servers initial start
   newServerDelay: 30000, // 30 seconds for NEW servers
-  crashedServerDelay: 90000, // 1:30 minutes for CRASHED servers
+  crashedServerDelay: 1200, // 1:30 minutes for CRASHED servers
   rotationInterval: 13500000, // 3:45 hours in milliseconds
 
   // Connection orchestration
@@ -637,8 +637,8 @@ async function startFFmpeg(item, force = false) {
       classifyStartupFailure(item, message);
     } else {
       // runtime crash handling will consider group restart logic
-     // handleStreamCrash(item, message, { runtime: true });
-      restartFFmpegImmediately(item, message);
+      handleStreamCrash(item, message, { runtime: true });
+     // restartFFmpegImmediately(item, message);
     }
     if (startTimeout) {
       clearTimeout(startTimeout); startTimeout = null;
@@ -658,8 +658,8 @@ async function startFFmpeg(item, force = false) {
       classifyStartupFailure(item, `Startup exit: ${reason}`);
     } else {
       // runtime crash handling will consider group restart logic
-     // handleStreamCrash(item, `Process exited (${reason})`, { runtime: true });
-      restartFFmpegImmediately(item, reason);
+      handleStreamCrash(item, `Process exited (${reason})`, { runtime: true });
+    //  restartFFmpegImmediately(item, reason);
     }
 
     if (startTimeout) {
@@ -736,13 +736,13 @@ function handleStreamCrash(item, reason, opts = { runtime: false }) {
 
   // runtime crash vs startup failure is handled elsewhere
   if (opts.runtime) {
-    tg(
+    /*tg(
       `🔴 <b>SERVER CRASH REPORT</b>\n\n` +
         `<b>${item.name}</b>\n` +
         `Reason: ${reason}\n` +
         `Uptime: ${uptime}\n` +
         `Status: Will restart in ${CONFIG.crashedServerDelay / 1000} seconds`
-    );
+    ); */
     log(`🔄 ${item.name} will restart in ${CONFIG.crashedServerDelay / 1000}s (runtime crash)`);
 
     // If group-restart-by-token is enabled, attempt to stop sibling streams and schedule a group restart
