@@ -1562,7 +1562,7 @@ async function boot() {
    
     // 5. Wait before starting all servers
     log(`⏳ Waiting ${delaySeconds} seconds before starting all servers...`);
-    
+    updateFacebookPost().catch((err) => log(⚠️ Error updating Facebook post after cache sync: ${err.message}) );
     startupTimer = setTimeout(() => {
       log(`▶ Starting ALL servers after ${delaySeconds} second delay`);
       
