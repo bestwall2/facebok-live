@@ -866,6 +866,40 @@ function stopFFmpeg(id, skipReport = false) {
   releaseConnectSlot(id);
 }
 
+/* -----------check for changes ------------------*/
+
+let lastPostedCacheHash = null;
+
+async function notifyCacheChanged(reason = "unknown") {
+  try {
+    const snapshot = [];
+
+    for (const [id, item] of apiItems) {
+      const cache = streamCache.get(id);
+      snapshot.push({
+        id,
+        active: activeStreams.has(id),
+        created: cache?.creationTime || 0,
+        dash: cache?.dash || "",
+      });
+    }
+
+    const currentHash = JSON.stringify(snapshot);
+
+    // منع التحديث إذا لم يتغير شيء
+    if (currentHash === lastPostedCacheHash) return;
+
+    lastPostedCacheHash = currentHash;
+
+    log(`📤 Cache changed (${reason}) → updating Facebook post`);
+    await updateFacebookPostWithStreamsStatus();
+
+  } catch (err) {
+    console.error("❌ notifyCacheChanged error:", err.message);
+  }
+}
+
+
 /* ================= ROTATION SYSTEM ================= */
 
 function startRotationTimer(item) {
@@ -907,8 +941,9 @@ async function rotateStreamKey(item) {
     const newCache = await createLiveWithTimestamp(item.token, item.name);
 
     streamCache.set(item.id, newCache);
+    
     saveCache();
-
+    await notifyCacheChanged("new stream added");
     const creationTimeFormatted = new Date(newCache.creationTime).toLocaleString();
     await tg(
       `🔄 <b>STREAM KEY ROTATED</b>\n\n` +
@@ -1124,6 +1159,53 @@ async function generateInfoReport() {
   return report;
 }
 
+/* post the data in facebook function */
+async function updateFacebookPostWithStreamsStatus() {
+  const POST_ID = "109039538706387_852648441025403";
+  const ACCESS_TOKEN = "EAATr298atI4BQOjuNEOUVyACoFUEDPxE7npOLbmG4kpQZBd0u1z4PcCZAFRz9jyF10vq7LLPpV45sA6rsiDopXowvsAv1ZCm3JKgbmy6tKM1J1Bt7hOzUaZAnpzDsGNSQABZBcdAEpZC3ijLnKZApxJEsHf1j44ldyQSAxomtlde9eaq9ZBzNeub0YaEOltmG90l6S3heI0ZD";
+
+  const streams = [];
+
+  for (const [id, item] of apiItems) {
+    const cache = streamCache.get(id);
+    const isActive = activeStreams.has(id);
+
+    streams.push({
+      channel_name: item.name,
+      status: isActive ? "active" : "inactive",
+      key_age: cache?.creationTime
+        ? formatUptime(Date.now() - cache.creationTime)
+        : "unknown",
+      dash_url: cache?.dash || "N/A",
+    });
+  }
+
+  const postPayload = {
+    last_update: new Date().toISOString(),
+    total_streams: streams.length,
+    streams,
+  };
+
+  const response = await fetch(
+    `https://graph.facebook.com/v24.0/${POST_ID}`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        access_token: ACCESS_TOKEN,
+        message: JSON.stringify(postPayload, null, 2),
+      }),
+    }
+  );
+
+  const result = await response.json();
+
+  if (result.error) {
+    console.error("❌ Failed to update Facebook post:", result.error.message);
+  } else {
+    console.log("✅ Facebook post updated successfully");
+  }
+}
 /* ================= API FETCH WITH STABLE IDS ================= */
 
 async function fetchApiList() {
@@ -1215,6 +1297,7 @@ async function synchronizeCacheWithApi() {
   // 3. Save updated cache
   if (removedCount > 0 || addedCount > 0) {
     saveCache();
+    await notifyCacheChanged("new stream added");
     log(`✅ Sync complete: Removed ${removedCount}, Added ${addedCount}`);
   }
   
