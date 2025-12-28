@@ -33,9 +33,9 @@ const CONFIG = {
     botToken: "7971806903:AAHwpdNzkk6ClL3O17JVxZnp5e9uI66L9WE",
     chatId: "-1002181683719",
   },
-  initialDelay: 20000, // 50 seconds for ALL servers initial start
-  newServerDelay: 30000, // 30 seconds for NEW servers
-  crashedServerDelay: 90000, // 1:30 minutes for CRASHED servers
+  initialDelay: 50000, // 50 seconds for ALL servers initial start
+  newServerDelay: 50000, // 30 seconds for NEW servers
+  crashedServerDelay: 60000, // 1:30 minutes for CRASHED servers
   rotationInterval: 13500000, // 3:45 hours in milliseconds
 
   // Connection orchestration
