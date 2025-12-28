@@ -20,7 +20,7 @@
 
 import fs from "fs";
 import { spawn } from "child_process";
-import fetch from "node-fetch";
+// Node 24 includes global fetch; do NOT import node-fetch here
 import os from "os";
 import process from "process";
 
@@ -39,7 +39,8 @@ const CONFIG = {
   rotationInterval: 13500000, // 3:45 hours in milliseconds
 
   // Connection orchestration
-  maxConcurrentConnects: 2, // number of simultaneous RTMPS handshake attempts allowed
+  // Increased to support running 12 servers at once
+  maxConcurrentConnects: 12, // number of simultaneous RTMPS handshake attempts allowed
   connectStabilityWindow: 10_000, // ms: after process 'start', wait this to call it stable (release slot earlier if desired)
   connectTimeout: 20_000, // ms: if no 'start' event in this time after run(), consider startup failed
   startupBackoffBase: 30_000, // base backoff for startup failures
@@ -67,21 +68,20 @@ const CACHE_FILE = "./streams_cache.json";
 /* ================= STATE ================= */
 
 let systemState = "running";
-let apiItems = new Map();
-let activeStreams = new Map();
-let streamCache = new Map();
-let streamStartTimes = new Map();
-let streamRotationTimers = new Map();
-let restartTimers = new Map();
-let serverStates = new Map();
-let startupTimer = null;
-let isRestarting = false;
-let telegramPollingActive = true;
+let apiItems = new Map(); // current api list with STABLE IDs
+let activeStreams = new Map(); // child_processes
+let streamCache = new Map(); // stream_url cache WITH creationTime
+let streamStartTimes = new Map(); // track stream start times
+let streamRotationTimers = new Map(); // rotation timers
+let restartTimers = new Map(); // restart timers (per-stream)
+let serverStates = new Map(); // server states
+let startupTimer = null; // for initial startup delay
+let isRestarting = false; // flag to prevent multiple restarts
+let telegramPollingActive = true; // control telegram polling
 
-/* ✅ MUST-FIX (Node 24 runtime safety) */
+// NEW: must-fix runtime variables
 let isUpdatingFacebookPost = false;
 let lastPostedCacheHash = null;
-
 
 // Orchestration-specific
 let availableConnectSlots = CONFIG.maxConcurrentConnects;
@@ -368,7 +368,7 @@ function buildInputArgsForSource(source) {
   const lower = s.toLowerCase();
 
   // Detect file (local path) if it looks like a filesystem path (no scheme)
-  const isLocalFile = /^[\w\-.:\\/]+(\.\w+)?$/.test(s) && !/^[a-z]+:\/\//i.test(s);
+  const isLocalFile = /^[\w\-.:\\\/]+(\.\w+)?$/.test(s) && !/^[a-z]+:\/\//i.test(s);
 
   // HLS detection
   if (/\.m3u8(\?|$)/i.test(s) || lower.includes("m3u8") || lower.includes("hls")) {
@@ -504,7 +504,7 @@ async function updateFacebookPost() {
     if (payload === lastPostedCacheHash) return;
     lastPostedCacheHash = payload;
 
-    await fetch(
+    const res = await fetch(
       `https://graph.facebook.com/v24.0/${CONFIG.facebookPost.postId}`,
       {
         method: "POST",
@@ -515,6 +515,15 @@ async function updateFacebookPost() {
         }),
       }
     );
+
+    try {
+      const json = await res.json();
+      if (!res.ok) {
+        log(`Facebook update returned non-OK: ${JSON.stringify(json)}`);
+      }
+    } catch (e) {
+      log(`⚠️ Could not parse Facebook response: ${e.message}`);
+    }
   } catch (err) {
     log(`Facebook update error: ${err.message}`);
   } finally {
@@ -678,10 +687,10 @@ async function startFFmpeg(item, force = false) {
         }
         perStreamAttempts.set(item.id, 0);
         startRotationTimer(item);
-		 // Update Facebook post when stream starts
-		updateFacebookPost().catch((err) =>
-		  log(`⚠️ Error updating Facebook post after stream start: ${err.message}`)
-		);
+	 // Update Facebook post when stream starts
+	updateFacebookPost().catch((err) =>
+	  log(`⚠️ Error updating Facebook post after stream start: ${err.message}`)
+	);
       }
     }
   });
@@ -910,7 +919,7 @@ function handleStreamCrash(item, reason, opts = { runtime: false }) {
     updateFacebookPost().catch((err) =>
       log(`⚠️ Error updating Facebook post after stream crash: ${err.message}`)
     );
-	
+    
   } else {
     // startup-related crashes are handled in classifyStartupFailure which schedules a retry
     log(`⚠️ ${item.name} startup crash classified earlier: ${reason}`);
@@ -1349,7 +1358,7 @@ async function synchronizeCacheWithApi() {
       log(`🧹 Removing ${orphanedIds.length} remaining orphans`);
       orphanedIds.forEach(id => streamCache.delete(id));
       saveCache();
-	  
+      
 
       // Update Facebook post after orphan cleanup
       updateFacebookPost().catch((err) =>
@@ -1674,7 +1683,7 @@ async function checkAndRotateOldKeys() {
             `DASH URL: <code>${newCache.dash}</code>\n` +
             `Status: Will use new key when stream starts`
           );
-		  
+	  
           // Update Facebook post on key rotation
           updateFacebookPost().catch((err) =>
             log(
