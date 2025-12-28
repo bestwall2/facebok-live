@@ -410,47 +410,19 @@ function buildInputArgsForSource(source) {
   // RTSP
   if (lower.startsWith("rtsp://")) {
     return [
-      /* ===== RECONNECT & NETWORK ===== */
-      "-reconnect",
-      "1",
-
-      "-reconnect_streamed",
-      "1",
-
-      "-reconnect_delay_max",
-      "60",
-
-      "-multiple_requests",
-      "1",
-
-      "-rw_timeout",
-      "30000000",
-
-      "-timeout",
-      "30000000",
-
-      /* ===== INPUT BUFFERING ===== */
-      "-fflags",
-      "+genpts+discardcorrupt+igndts",
-
-      "-flags",
-      "low_delay",
-
-      "-analyzeduration",
-      "10000000",
-
-      "-probesize",
-      "10000000",
-
-      /* ===== HLS SPECIFIC ===== */
-      "-max_reload",
-      "1000",
-
-      "-http_persistent",
-      "1",
-
-      "-http_multiple",
-      "1",
+      "reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "60",
+      "-multiple_requests", "1",
+      "-timeout", "90000000",
+      "reconnect_at_eof", "1",
+      "rw_timeout", "90000000",      
+      "-fflags", "+genpts+igndts+discardcorrupt+nobuffe",
+      "-max_delay", "90000000",        // 30 seconds buffer
+      "-thread_queue_size", "16384",
+      "-analyzeduration", "10M",
+      "-probesize", "10M",
+      "-itsoffset", "50",
       /* ===== INPUT ===== */
       "-i",
       s,
@@ -659,75 +631,12 @@ async function startFFmpeg(item, force = false) {
 
   // Output (minimal requested)
   const outputArgs = [
-    /* ===== VIDEO (FACEBOOK SAFE) ===== */
-    "-c:v",
-    "libx264",
-
-    "-preset",
-    "veryfast",
-
-    "-tune",
-    "zerolatency",
-
-    "-profile:v",
-    "high",
-
-    "-level",
-    "4.1",
-
-    "-pix_fmt",
-    "yuv420p",
-
-    "-g",
-    "60",
-
-    "-keyint_min",
-    "60",
-
-    "-sc_threshold",
-    "0",
-
-    "-bf",
-    "0",
-
-    "-b:v",
-    "3000k",
-
-    "-maxrate",
-    "3000k",
-
-    "-bufsize",
-    "6000k",
-
-    "-fps_mode",
-    "cfr",
-    "-r",
-    "30",
-
-    /* ===== AUDIO ===== */
-    "-c:a",
-    "aac",
-
-    "-b:a",
-    "128k",
-
-    "-ar",
-    "44100",
-
-    "-ac",
-    "2",
-
-    /* ===== OUTPUT SAFETY ===== */
-    "-max_muxing_queue_size",
-    "4096",
-
-    "-f",
-    "flv",
-
-    "-loglevel",
-    "error",
-
-    cache.stream_url,
+    "-c:v", "copy",
+    "-c:a", "copy",
+    "-fps_mode", "cfr",
+    "-f", "flv",
+    "-loglevel", "error",
+    cache.stream_url
   ];
 
   const args = [...inputArgs, ...outputArgs];
