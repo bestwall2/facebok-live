@@ -648,9 +648,7 @@ async function startFFmpeg(item, force = false) {
     perStreamAttempts.set(item.id, 0);
     startRotationTimer(item);
 	 // Update Facebook post when stream starts
-    updateFacebookPost().catch((err) =>
-      log(`⚠️ Error updating Facebook post after stream start: ${err.message}`)
-    );
+    
   });
 
   child.stderr.on("data", (chunk) => {
@@ -688,9 +686,7 @@ async function startFFmpeg(item, force = false) {
         perStreamAttempts.set(item.id, 0);
         startRotationTimer(item);
 	 // Update Facebook post when stream starts
-	updateFacebookPost().catch((err) =>
-	  log(`⚠️ Error updating Facebook post after stream start: ${err.message}`)
-	);
+	
       }
     }
   });
@@ -738,10 +734,7 @@ async function startFFmpeg(item, force = false) {
       clearTimeout(stabilityTimer); stabilityTimer = null;
     }
 	
-	 // Update Facebook post when stream starts
-    updateFacebookPost().catch((err) =>
-      log(`⚠️ Error updating Facebook post after stream start: ${err.message}`)
-    );
+	
 	
   });
 }
@@ -787,9 +780,6 @@ function classifyStartupFailure(item, message = "Startup failure") {
   }, backoff);
   restartTimers.set(item.id, timer);
  
-  updateFacebookPost().catch((err) =>
-    log(`⚠️ Error updating Facebook post after startup failure: ${err.message}`)
-  );
 }
 
 /* ================= FFMPEG STOP & CRASH HANDLING ================= */
@@ -889,12 +879,7 @@ function handleStreamCrash(item, reason, opts = { runtime: false }) {
 
         groupRestartTimers.set(token, groupTimer);
 
-        // Update Facebook post on group restart
-        updateFacebookPost().catch((err) =>
-          log(
-            `⚠️ Error updating Facebook post after group restart: ${err.message}`
-          )
-        );
+      
         return;
       }
       // otherwise fall-through to single-stream restart behavior below
@@ -915,10 +900,7 @@ function handleStreamCrash(item, reason, opts = { runtime: false }) {
     }, CONFIG.crashedServerDelay);
     restartTimers.set(item.id, restartTimer);
 
-    // Update Facebook post on crash
-    updateFacebookPost().catch((err) =>
-      log(`⚠️ Error updating Facebook post after stream crash: ${err.message}`)
-    );
+    
     
   } else {
     // startup-related crashes are handled in classifyStartupFailure which schedules a retry
@@ -957,10 +939,6 @@ function stopFFmpeg(id, skipReport = false) {
   // Ensure we release any slot we thought we held for this id
    releaseConnectSlot(id);
 
-  // Update Facebook post when stream stops
-  updateFacebookPost().catch((err) =>
-    log(`⚠️ Error updating Facebook post after stream stop: ${err.message}`)
-  );
 }
 
 /* ================= ROTATION SYSTEM ================= */
@@ -1039,12 +1017,7 @@ async function rotateStreamKey(item) {
       }
     }, 300000);
 
-    // Update Facebook post on rotation failure
-    updateFacebookPost().catch((err) =>
-      log(
-        `⚠️ Error updating Facebook post after rotation failure: ${err.message}`
-      )
-    );
+   
   }
 }
 
@@ -1098,12 +1071,6 @@ async function restartSystem() {
   
   log("🔄 Restarting system from scratch...");
   await tg("✅ <b>Cleanup Complete</b>\nNow booting up fresh system...");
-
-  // Update Facebook post on system restart
-  updateFacebookPost().catch((err) =>
-    log(`⚠️ Error updating Facebook post after system restart: ${err.message}`)
-  );
-
  
   
   boot();
@@ -1556,10 +1523,7 @@ async function finalCheckReport() {
 
   await tg(`📡 <b>DASH REPORT</b>\n\n${lines.join("\n\n")}`);
 
-  // Update Facebook post on final check
-  updateFacebookPost().catch((err) =>
-    log(`⚠️ Error updating Facebook post after final check: ${err.message}`)
-  );
+ 
 }
 
 /* ================= BOOT WITH PROPER SYNCHRONIZATION ================= */
@@ -1597,10 +1561,7 @@ async function boot() {
       `Bot commands: /info /status /restart /help`
     );
 
-    // 5. Initial Facebook post update
-    updateFacebookPost().catch((err) =>
-      log(`⚠️ Error updating Facebook post on boot: ${err.message}`)
-    );
+   
     // 5. Wait before starting all servers
     log(`⏳ Waiting ${delaySeconds} seconds before starting all servers...`);
     
