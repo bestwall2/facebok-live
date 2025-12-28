@@ -365,7 +365,7 @@ function buildInputArgsForSource(source) {
       "-user_agent", getUserAgent("default"),
       "-reconnect", "1",
       "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "10",
+      "-reconnect_delay_max", "60",
       "-multiple_requests", "1",
       "-timeout", "30000000",
       "reconnect_at_eof", "1",
@@ -519,8 +519,13 @@ async function startFFmpeg(item, force = false) {
 
   // Output (minimal requested)
   const outputArgs = [
-    "-c:v", "copy",
-    "-c:a", "copy",
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-b:v", "2500k",
+    "-maxrate", "2500k",
+    "-bufsize", "5000k",
+    "-c:a", "aac",
+    "-b:a", "128k",
     "-fps_mode", "cfr",
     "-f", "flv",
     "-loglevel", "error",
