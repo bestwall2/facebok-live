@@ -709,9 +709,7 @@ async function startFFmpeg(item, force = false) {
       clearTimeout(stabilityTimer); stabilityTimer = null;
     }
 	 // Update Facebook post when stream starts
-    updateFacebookPost().catch((err) =>
-      log(`⚠️ Error updating Facebook post after stream start: ${err.message}`)
-    );
+   
   });
 
   child.on("exit", (code, signal) => {
