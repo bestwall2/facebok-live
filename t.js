@@ -373,20 +373,28 @@ function buildInputArgsForSource(source) {
   if (/\.m3u8(\?|$)/i.test(s) || lower.includes("m3u8") || lower.includes("hls")) {
     return [
       "-user_agent", getUserAgent("default"),
+    
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "10",
-      "-timeout", "10000000",
+    
       "-rw_timeout", "15000000",
-      "-fflags", "+genpts+igndts+discardcorrupt",
-      "-flags", "low_delay",
-      "-use_wallclock_as_timestamps", "1",
-      "-thread_queue_size", "8192",      // reduce queue overflow
+    
+      "-thread_queue_size", "8192",
       "-probesize", "10M",
       "-analyzeduration", "10M",
+    
+      // 🔥 الأهم
+      "-fflags", "+genpts+discardcorrupt",
+      "-avoid_negative_ts", "make_zero",
+    
+      // ❌ لا wallclock
+      // ❌ لا igndts
+    
       "-i", s
     ];
+
   }
 
   // RTSP
@@ -584,42 +592,49 @@ async function startFFmpeg(item, force = false) {
   ];*/
   
   const outputArgs = [
-    // ===== Video =====
-    "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-tune", "zerolatency",
-    "-profile:v", "high",
-    "-level", "4.1",
-    "-pix_fmt", "yuv420p",
-    "-r", "25",                    // FB max framerate
-    "-g", "50",                    // GOP for Facebook
-    "-keyint_min", "50",
-    "-sc_threshold", "0",
-    "-b:v", "4500k",               // 1080p stable
-    "-maxrate", "4500k",
-    "-bufsize", "9000k",
-    "-vf", "scale=-2:1080,fps=25", // force 1080p max & 25 fps
-    "-max_interleave_delta", "0",
-    "-threads", "4",
-    "-tune", "fastdecode",
-  
-    // ===== Audio =====
-    "-c:a", "aac",
-    "-b:a", "160k",                // slightly higher quality
-    "-ar", "48000",
-    "-ac", "2",
-  
-    // ===== Facebook specific tweaks =====
-    "-flush_packets", "0",
-    "-f", "flv",
-    "-rtmp_live", "live",
-    "-flvflags", "no_duration_filesize",
-    "-max_muxing_queue_size", "1024",  // prevent buffer overflow
-    "-tls_verify", "0",
-    "-loglevel", "error",
-  
-    cache.stream_url
-  ];
+      // ===== Video =====
+      "-c:v", "libx264",
+      "-preset", "veryfast",
+      "-tune", "zerolatency",
+      "-profile:v", "high",
+      "-level", "4.1",
+      "-pix_fmt", "yuv420p",
+    
+      "-r", "25",
+      "-g", "50",
+      "-keyint_min", "50",
+      "-sc_threshold", "0",
+    
+      "-b:v", "4500k",
+      "-maxrate", "4500k",
+      "-bufsize", "9000k",
+    
+      "-vf", "scale=-2:1080,fps=25",
+    
+      // 🔥 منع الرجوع الزمني
+      "-vsync", "1",
+      "-async", "1",
+    
+      "-max_interleave_delta", "0",
+      "-max_muxing_queue_size", "1024",
+    
+      // ===== Audio =====
+      "-c:a", "aac",
+      "-b:a", "160k",
+      "-ar", "48000",
+      "-ac", "2",
+    
+      // ===== Facebook =====
+      "-f", "flv",
+      "-rtmp_live", "live",
+      "-flvflags", "no_duration_filesize",
+      "-flush_packets", "0",
+      "-tls_verify", "0",
+      "-loglevel", "error",
+    
+      cache.stream_url
+    ];
+
 
 
   const args = [...inputArgs, ...outputArgs];
