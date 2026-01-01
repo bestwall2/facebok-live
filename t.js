@@ -637,7 +637,76 @@ async function startFFmpeg(item, force = false) {
 
 
 
-  const args = [...inputArgs, ...outputArgs];
+  //const args = [...inputArgs, ...outputArgs];
+  const ffmpegArgs = [
+    // ================= INPUT (HTTP PROGRESSIVE SAFE) =================
+    "-re", // 🔥 CRITICAL for HTTP sources
+  
+    "-user_agent", getUserAgent("default"),
+  
+    "-reconnect", "1",
+    "-reconnect_streamed", "1",
+    "-reconnect_at_eof", "1",
+    "-reconnect_delay_max", "10",
+  
+    "-rw_timeout", "15000000",
+  
+    // ================= BUFFER (SAFE, NO REWIND) =================
+    "-thread_queue_size", "2048",
+    "-analyzeduration", "3M",
+    "-probesize", "3M",
+  
+    // ================= TIMESTAMP SANITY =================
+    "-fflags", "+genpts+discardcorrupt",
+    "-avoid_negative_ts", "make_zero",
+  
+    // ❌ DO NOT USE wallclock timestamps
+  
+    // ================= INPUT =================
+    "-i", source,
+  
+    // ================= VIDEO (FACEBOOK SAFE) =================
+    "-vf", "scale=-2:720,fps=25",
+    "-r", "25",
+    "-vsync", "1",
+    "-fps_mode", "cfr",
+  
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-tune", "zerolatency",
+  
+    "-profile:v", "high",
+    "-level", "4.1",
+    "-pix_fmt", "yuv420p",
+  
+    "-b:v", "2500k",
+    "-maxrate", "2500k",
+    "-bufsize", "5000k",
+  
+    "-g", "50",
+    "-keyint_min", "50",
+    "-sc_threshold", "0",
+  
+    // ================= AUDIO (ANTI-DRIFT) =================
+    "-c:a", "aac",
+    "-b:a", "128k",
+    "-ar", "44100",
+    "-ac", "2",
+    "-af", "aresample=async=1:first_pts=0",
+  
+    // ================= FACEBOOK RTMPS =================
+    "-f", "flv",
+    "-flvflags", "no_duration_filesize",
+    "-rtmp_live", "live",
+    "-flush_packets", "0",
+    "-max_muxing_queue_size", "1024",
+  
+    // ================= LOGGING =================
+    "-loglevel", "warning",
+  
+    // ================= OUTPUT =================
+    cache.stream_url
+  ];
 
   log(`▶ Spawning ffmpeg for ${item.name}: ffmpeg ${args.join(" ")}`);
 
@@ -669,7 +738,7 @@ async function startFFmpeg(item, force = false) {
   }, CONFIG.connectTimeout);
 
   try {
-    child = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
+    child = spawn("ffmpeg", ffmpegArgs, { stdio: ["ignore", "pipe", "pipe"] });
   } catch (err) {
     log(`❌ spawn() failed for ${item.name}: ${err.message}`);
     ensureReleaseSlot();
