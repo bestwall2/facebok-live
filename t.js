@@ -363,47 +363,28 @@ function getUserAgent(type = "default") {
    This function centralizes input-option sets per source type.
    It returns an array of FFmpeg args that should be placed before the output args.
 */
+
 function buildInputArgsForSource(source) {
   const s = String(source || "").trim();
   const lower = s.toLowerCase();
-
-  // Detect file (local path) if it looks like a filesystem path (no scheme)
   const isLocalFile = /^[\w\-.:\\\/]+(\.\w+)?$/.test(s) && !/^[a-z]+:\/\//i.test(s);
 
-  // HLS detection
+  // HLS Input
   if (/\.m3u8(\?|$)/i.test(s) || lower.includes("m3u8") || lower.includes("hls")) {
-    // const proxyUrl = `https://epservers.ahmed-dikha26.workers.dev/?url=${encodeURIComponent(s)}`;
     return [
       "-user_agent", getUserAgent("default"),
-    
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "10",
-    
-      "-multiple_requests", "1",
-    
       "-timeout", "10000000",
       "-rw_timeout", "15000000",
-    
       "-fflags", "+genpts+igndts+discardcorrupt",
       "-flags", "low_delay",
-    
       "-use_wallclock_as_timestamps", "1",
-    
-      "-max_delay", "30000000",
-      "-thread_queue_size", "16384",
-    
-      // 🔴 ADD
-      "-reorder_queue_size", "1000",
-      "-max_interleave_delta", "0",
-      "-err_detect", "ignore_err",
-    
-      "-analyzeduration", "10M",
+      "-thread_queue_size", "8192",      // reduce queue overflow
       "-probesize", "10M",
-    
-      "-itsoffset", "0",
-    
+      "-analyzeduration", "10M",
       "-i", s
     ];
   }
@@ -414,46 +395,49 @@ function buildInputArgsForSource(source) {
       "-rtsp_transport", "tcp",
       "-stimeout", "10000000",
       "-fflags", "+genpts+discardcorrupt",
+      "-thread_queue_size", "8192",
       "-i", s
     ];
   }
 
-  // SRT (srt://)
+  // SRT
   if (lower.startsWith("srt://")) {
     return [
       "-timeout", "10000000",
       "-reconnect", "1",
       "-fflags", "+genpts+discardcorrupt",
+      "-thread_queue_size", "8192",
       "-i", s
     ];
   }
 
-  // UDP/RTP (udp:// rtp://)
+  // UDP/RTP
   if (lower.startsWith("udp://") || lower.startsWith("rtp://")) {
     return [
       "-fflags", "+genpts+discardcorrupt",
+      "-thread_queue_size", "8192",
       "-i", s
     ];
   }
 
-  // HTTP(s) progressive (mp4, mkv served over http)
+  // HTTP(s) progressive
   if (/^https?:\/\//i.test(s)) {
-    // If it looks like HLS we handled it earlier, otherwise treat as progressive/http stream
     return [
       "-user_agent", getUserAgent("default"),
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_delay_max", "10",
       "-timeout", "10000000",
-      "-analyzeduration", "5000000",
-      "-probesize", "5000000",
+      "-analyzeduration", "5M",
+      "-probesize", "5M",
       "-fflags", "+genpts+discardcorrupt",
       "-err_detect", "ignore_err",
+      "-thread_queue_size", "8192",
       "-i", s
     ];
   }
 
-  // RTMP or other scheme-less input (treat as RTMP or generic)
+  // RTMP or generic
   if (lower.startsWith("rtmp://") || s.startsWith("rtmps://") || !isLocalFile) {
     return [
       "-user_agent", getUserAgent("default"),
@@ -461,28 +445,24 @@ function buildInputArgsForSource(source) {
       "-reconnect_streamed", "1",
       "-reconnect_delay_max", "10",
       "-timeout", "10000000",
-      "-analyzeduration", "5000000",
-      "-probesize", "5000000",
+      "-analyzeduration", "5M",
+      "-probesize", "5M",
       "-fflags", "+genpts+discardcorrupt",
       "-err_detect", "ignore_err",
+      "-thread_queue_size", "8192",
       "-i", s
     ];
   }
 
   // Local file fallback
   if (isLocalFile) {
-    return [
-      "-re",
-      "-i", s
-    ];
+    return ["-re", "-i", s];
   }
 
-  // Ultimate fallback: minimal input
-  return [
-    "-re",
-    "-i", s
-  ];
+  // Ultimate fallback
+  return ["-re", "-i", s];
 }
+
 
 /*       updqte fqcebook post          */
 
@@ -604,44 +584,42 @@ async function startFFmpeg(item, force = false) {
   ];*/
   
   const outputArgs = [
-    // ===== Video (Facebook Compatible) =====
+    // ===== Video =====
     "-c:v", "libx264",
     "-preset", "veryfast",
     "-tune", "zerolatency",
     "-profile:v", "high",
     "-level", "4.1",
     "-pix_fmt", "yuv420p",
-    "-r", "25",
-    "-g", "50",
+    "-r", "25",                    // FB max framerate
+    "-g", "50",                    // GOP for Facebook
     "-keyint_min", "50",
     "-sc_threshold", "0",
-    "-b:v", "4000k",
-    "-maxrate", "4000k",
-    "-bufsize", "8000k",
-  
-    // 🔴 ADD
-    "-vf", "fps=25",
+    "-b:v", "4500k",               // 1080p stable
+    "-maxrate", "4500k",
+    "-bufsize", "9000k",
+    "-vf", "scale=-2:1080,fps=25", // force 1080p max & 25 fps
     "-max_interleave_delta", "0",
+    "-threads", "4",
+    "-tune", "fastdecode",
   
     // ===== Audio =====
     "-c:a", "aac",
-    "-b:a", "128k",
+    "-b:a", "160k",                // slightly higher quality
     "-ar", "48000",
     "-ac", "2",
   
-    // 🟠 ADD
+    // ===== Facebook specific tweaks =====
     "-flush_packets", "0",
-    "-flvflags", "no_duration_filesize",
-  
-    // ===== Output =====
     "-f", "flv",
     "-rtmp_live", "live",
+    "-flvflags", "no_duration_filesize",
+    "-max_muxing_queue_size", "1024",  // prevent buffer overflow
     "-tls_verify", "0",
     "-loglevel", "error",
   
     cache.stream_url
   ];
-
 
 
   const args = [...inputArgs, ...outputArgs];
