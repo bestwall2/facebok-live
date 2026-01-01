@@ -378,8 +378,8 @@ function buildInputArgsForSource(source) {
     
       "-reconnect", "1",
       "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "10",
       "-reconnect_at_eof", "1",
+      "-reconnect_delay_max", "10",
     
       "-multiple_requests", "1",
     
@@ -394,6 +394,11 @@ function buildInputArgsForSource(source) {
       "-max_delay", "30000000",
       "-thread_queue_size", "16384",
     
+      // 🔴 ADD
+      "-reorder_queue_size", "1000",
+      "-max_interleave_delta", "0",
+      "-err_detect", "ignore_err",
+    
       "-analyzeduration", "10M",
       "-probesize", "10M",
     
@@ -401,7 +406,6 @@ function buildInputArgsForSource(source) {
     
       "-i", s
     ];
-
   }
 
   // RTSP
@@ -602,32 +606,42 @@ async function startFFmpeg(item, force = false) {
   const outputArgs = [
     // ===== Video (Facebook Compatible) =====
     "-c:v", "libx264",
-    "-preset", "veryfast",          // superfast غير مفضل، veryfast هو الآمن
+    "-preset", "veryfast",
     "-tune", "zerolatency",
     "-profile:v", "high",
     "-level", "4.1",
     "-pix_fmt", "yuv420p",
-    "-r", "25",                     // Facebook يفضل 25 أو 30
-    "-g", "50",                     // GOP = fps × 2
+    "-r", "25",
+    "-g", "50",
     "-keyint_min", "50",
     "-sc_threshold", "0",
     "-b:v", "4000k",
     "-maxrate", "4000k",
     "-bufsize", "8000k",
   
-    // ===== Audio (Facebook Compatible) =====
+    // 🔴 ADD
+    "-vf", "fps=25",
+    "-max_interleave_delta", "0",
+  
+    // ===== Audio =====
     "-c:a", "aac",
     "-b:a", "128k",
-    "-ar", "48000",                 // 44100 ❌ غير مفضل
+    "-ar", "48000",
     "-ac", "2",
+  
+    // 🟠 ADD
+    "-flush_packets", "0",
+    "-flvflags", "no_duration_filesize",
   
     // ===== Output =====
     "-f", "flv",
     "-rtmp_live", "live",
     "-tls_verify", "0",
     "-loglevel", "error",
-    cache.stream_url       // Your Facebook RTMPS/RTMP URL
+  
+    cache.stream_url
   ];
+
 
 
   const args = [...inputArgs, ...outputArgs];
