@@ -577,14 +577,38 @@ async function startFFmpeg(item, force = false) {
   const inputArgs = buildInputArgsForSource(source);
 
   // Output (minimal requested)
-  const outputArgs = [
+  /*const outputArgs = [
     "-c:v", "copy",
     "-c:a", "copy",
     "-fps_mode", "cfr",
     "-f", "flv",
     "-loglevel", "error",
     cache.stream_url
+  ];*/
+  
+  const outputArgs = [
+    // Video Encoding (Required because Facebook doesn't support HEVC)
+    "-c:v", "libx264",
+    "-preset", "superfast",
+    "-tune", "zerolatency",
+    "-b:v", "4000k",
+    "-maxrate", "4000k",
+    "-bufsize", "8000k",
+    "-pix_fmt", "yuv420p",
+    "-g", "100",           // Keyframe interval (2 seconds for 50fps)
+    
+    // Audio Encoding
+    "-c:a", "aac",
+    "-b:a", "128k",
+    "-ar", "44100",
+    
+    // Global/Output Settings
+    "-fps_mode", "cfr",
+    "-f", "flv",
+    "-loglevel", "error",
+    cache.stream_url       // Your Facebook RTMPS/RTMP URL
   ];
+
 
   const args = [...inputArgs, ...outputArgs];
 
