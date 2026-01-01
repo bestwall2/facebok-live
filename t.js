@@ -375,20 +375,33 @@ function buildInputArgsForSource(source) {
     // const proxyUrl = `https://epservers.ahmed-dikha26.workers.dev/?url=${encodeURIComponent(s)}`;
     return [
       "-user_agent", getUserAgent("default"),
+    
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_delay_max", "10",
+      "-reconnect_at_eof", "1",
+    
       "-multiple_requests", "1",
+    
       "-timeout", "10000000",
-      
-      "-fflags", "+genpts+igndts",
-      "-max_delay", "30000000",        // 30 seconds buffer
+      "-rw_timeout", "15000000",
+    
+      "-fflags", "+genpts+igndts+discardcorrupt",
+      "-flags", "low_delay",
+    
+      "-use_wallclock_as_timestamps", "1",
+    
+      "-max_delay", "30000000",
       "-thread_queue_size", "16384",
+    
       "-analyzeduration", "10M",
       "-probesize", "10M",
-      "-itsoffset", "50",
+    
+      "-itsoffset", "0",
+    
       "-i", s
     ];
+
   }
 
   // RTSP
@@ -587,24 +600,31 @@ async function startFFmpeg(item, force = false) {
   ];*/
   
   const outputArgs = [
-    // Video Encoding (Required because Facebook doesn't support HEVC)
+    // ===== Video (Facebook Compatible) =====
     "-c:v", "libx264",
-    "-preset", "superfast",
+    "-preset", "veryfast",          // superfast غير مفضل، veryfast هو الآمن
     "-tune", "zerolatency",
+    "-profile:v", "high",
+    "-level", "4.1",
+    "-pix_fmt", "yuv420p",
+    "-r", "25",                     // Facebook يفضل 25 أو 30
+    "-g", "50",                     // GOP = fps × 2
+    "-keyint_min", "50",
+    "-sc_threshold", "0",
     "-b:v", "4000k",
     "-maxrate", "4000k",
     "-bufsize", "8000k",
-    "-pix_fmt", "yuv420p",
-    "-g", "100",           // Keyframe interval (2 seconds for 50fps)
-    
-    // Audio Encoding
+  
+    // ===== Audio (Facebook Compatible) =====
     "-c:a", "aac",
     "-b:a", "128k",
-    "-ar", "44100",
-    
-    // Global/Output Settings
-    "-fps_mode", "cfr",
+    "-ar", "48000",                 // 44100 ❌ غير مفضل
+    "-ac", "2",
+  
+    // ===== Output =====
     "-f", "flv",
+    "-rtmp_live", "live",
+    "-tls_verify", "0",
     "-loglevel", "error",
     cache.stream_url       // Your Facebook RTMPS/RTMP URL
   ];
