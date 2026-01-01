@@ -369,105 +369,87 @@ function buildInputArgsForSource(source) {
   const lower = s.toLowerCase();
   const isLocalFile = /^[\w\-.:\\\/]+(\.\w+)?$/.test(s) && !/^[a-z]+:\/\//i.test(s);
 
-  // HLS Input
+  // ================= HLS =================
   if (/\.m3u8(\?|$)/i.test(s) || lower.includes("m3u8") || lower.includes("hls")) {
     return [
       "-user_agent", getUserAgent("default"),
-    
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "10",
-    
       "-rw_timeout", "15000000",
-    
-      "-thread_queue_size", "8192",
-      "-probesize", "10M",
-      "-analyzeduration", "10M",
-    
-      // 🔥 الأهم
+
+      "-thread_queue_size", "2048",
+      "-analyzeduration", "3M",
+      "-probesize", "3M",
+
       "-fflags", "+genpts+discardcorrupt",
       "-avoid_negative_ts", "make_zero",
-    
-      // ❌ لا wallclock
-      // ❌ لا igndts
-    
+
       "-i", s
     ];
-
   }
 
-  // RTSP
+  // ================= RTSP =================
   if (lower.startsWith("rtsp://")) {
     return [
       "-rtsp_transport", "tcp",
       "-stimeout", "10000000",
+      "-thread_queue_size", "2048",
       "-fflags", "+genpts+discardcorrupt",
-      "-thread_queue_size", "8192",
+      "-avoid_negative_ts", "make_zero",
       "-i", s
     ];
   }
 
-  // SRT
-  if (lower.startsWith("srt://")) {
-    return [
-      "-timeout", "10000000",
-      "-reconnect", "1",
-      "-fflags", "+genpts+discardcorrupt",
-      "-thread_queue_size", "8192",
-      "-i", s
-    ];
-  }
-
-  // UDP/RTP
-  if (lower.startsWith("udp://") || lower.startsWith("rtp://")) {
-    return [
-      "-fflags", "+genpts+discardcorrupt",
-      "-thread_queue_size", "8192",
-      "-i", s
-    ];
-  }
-
-  // HTTP(s) progressive
+  // ================= HTTP PROGRESSIVE (FIXED) =================
   if (/^https?:\/\//i.test(s)) {
     return [
+      "-re", // 🔥 CRITICAL FIX
+
       "-user_agent", getUserAgent("default"),
+
       "-reconnect", "1",
       "-reconnect_streamed", "1",
+      "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "10",
-      "-timeout", "10000000",
-      "-analyzeduration", "5M",
-      "-probesize", "5M",
+
+      "-rw_timeout", "15000000",
+
+      "-thread_queue_size", "2048",
+      "-analyzeduration", "3M",
+      "-probesize", "3M",
+
       "-fflags", "+genpts+discardcorrupt",
+      "-avoid_negative_ts", "make_zero",
       "-err_detect", "ignore_err",
-      "-thread_queue_size", "8192",
+
       "-i", s
     ];
   }
 
-  // RTMP or generic
-  if (lower.startsWith("rtmp://") || s.startsWith("rtmps://") || !isLocalFile) {
+  // ================= RTMP / GENERIC =================
+  if (lower.startsWith("rtmp://") || lower.startsWith("rtmps://")) {
     return [
       "-user_agent", getUserAgent("default"),
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_delay_max", "10",
-      "-timeout", "10000000",
-      "-analyzeduration", "5M",
-      "-probesize", "5M",
+      "-rw_timeout", "15000000",
+
+      "-thread_queue_size", "2048",
       "-fflags", "+genpts+discardcorrupt",
-      "-err_detect", "ignore_err",
-      "-thread_queue_size", "8192",
+      "-avoid_negative_ts", "make_zero",
+
       "-i", s
     ];
   }
 
-  // Local file fallback
+  // ================= LOCAL FILE =================
   if (isLocalFile) {
     return ["-re", "-i", s];
   }
 
-  // Ultimate fallback
   return ["-re", "-i", s];
 }
 
@@ -574,110 +556,24 @@ async function startFFmpeg(item, force = false) {
   serverStates.set(item.id, "connecting");
   log(`⏳ ${item.name} is connecting (slot acquired). Waiting 5s before ffmpeg.spawn()...`);
 
-  // small pre-start wait to reduce tight bursts (keeps startup cadence smoother)
- //await sleep(5000);
-
   // Build input args based on source type
   const source = item.source || "";
   const inputArgs = buildInputArgsForSource(source);
 
-  // Output (minimal requested)
-  /*const outputArgs = [
-    "-c:v", "copy",
-    "-c:a", "copy",
-    "-fps_mode", "cfr",
-    "-f", "flv",
-    "-loglevel", "error",
-    cache.stream_url
-  ];*/
-  
+  const inputArgs = buildInputArgsForSource(source);
+
   const outputArgs = [
-      // ===== Video =====
-      "-c:v", "libx264",
-      "-preset", "veryfast",
-      "-tune", "zerolatency",
-      "-profile:v", "high",
-      "-level", "4.1",
-      "-pix_fmt", "yuv420p",
-    
-      "-r", "25",
-      "-g", "50",
-      "-keyint_min", "50",
-      "-sc_threshold", "0",
-    
-      "-b:v", "4500k",
-      "-maxrate", "4500k",
-      "-bufsize", "9000k",
-    
-      "-vf", "scale=-2:1080,fps=25",
-    
-      // 🔥 منع الرجوع الزمني
-      "-vsync", "1",
-      "-async", "1",
-    
-      "-max_interleave_delta", "0",
-      "-max_muxing_queue_size", "1024",
-    
-      // ===== Audio =====
-      "-c:a", "aac",
-      "-b:a", "160k",
-      "-ar", "48000",
-      "-ac", "2",
-    
-      // ===== Facebook =====
-      "-f", "flv",
-      "-rtmp_live", "live",
-      "-flvflags", "no_duration_filesize",
-      "-flush_packets", "0",
-      "-tls_verify", "0",
-      "-loglevel", "error",
-    
-      cache.stream_url
-    ];
-
-
-
-  //const args = [...inputArgs, ...outputArgs];
-  const ffmpegArgs = [
-    // ================= INPUT (HTTP PROGRESSIVE SAFE) =================
-    "-re", // 🔥 CRITICAL for HTTP sources
+    "-c:v", "libx264",
+    "-preset", "veryfast",
+    "-tune", "zerolatency",
+    "-profile:v", "high",
+    "-level", "4.1",
+    "-pix_fmt", "yuv420p",
   
-    "-user_agent", getUserAgent("default"),
-  
-    "-reconnect", "1",
-    "-reconnect_streamed", "1",
-    "-reconnect_at_eof", "1",
-    "-reconnect_delay_max", "10",
-  
-    "-rw_timeout", "15000000",
-  
-    // ================= BUFFER (SAFE, NO REWIND) =================
-    "-thread_queue_size", "2048",
-    "-analyzeduration", "3M",
-    "-probesize", "3M",
-  
-    // ================= TIMESTAMP SANITY =================
-    "-fflags", "+genpts+discardcorrupt",
-    "-avoid_negative_ts", "make_zero",
-  
-    // ❌ DO NOT USE wallclock timestamps
-  
-    // ================= INPUT =================
-    "-i", source,
-  
-    // ================= VIDEO (FACEBOOK SAFE) =================
     "-vf", "scale=-2:720,fps=25",
     "-r", "25",
     "-vsync", "1",
     "-fps_mode", "cfr",
-  
-    "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-tune", "zerolatency",
-  
-    "-profile:v", "high",
-    "-level", "4.1",
-    "-pix_fmt", "yuv420p",
   
     "-b:v", "2500k",
     "-maxrate", "2500k",
@@ -687,26 +583,23 @@ async function startFFmpeg(item, force = false) {
     "-keyint_min", "50",
     "-sc_threshold", "0",
   
-    // ================= AUDIO (ANTI-DRIFT) =================
     "-c:a", "aac",
     "-b:a", "128k",
     "-ar", "44100",
     "-ac", "2",
     "-af", "aresample=async=1:first_pts=0",
   
-    // ================= FACEBOOK RTMPS =================
     "-f", "flv",
     "-flvflags", "no_duration_filesize",
     "-rtmp_live", "live",
     "-flush_packets", "0",
     "-max_muxing_queue_size", "1024",
   
-    // ================= LOGGING =================
     "-loglevel", "warning",
   
-    // ================= OUTPUT =================
     cache.stream_url
   ];
+  const args = [...inputArgs, ...outputArgs];
 
   log(`▶ Spawning ffmpeg for ${item.name}: ffmpeg ${args.join(" ")}`);
 
