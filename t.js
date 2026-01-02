@@ -570,48 +570,25 @@ async function startFFmpeg(item, force = false) {
   const inputArgs = buildInputArgsForSource(source);
 
   const outputArgs = [
-    // ===== VIDEO (LOW BANDWIDTH SAFE) =====
-    "-c:v", "libx264",
-    "-preset", "veryfast",
-    "-tune", "zerolatency",
-    
-    "-profile:v", "baseline",
-    "-level", "3.1",
-    "-pix_fmt", "yuv420p",
-    
-    // 🔒 تثبيت الإطارات
-    "-vf", "scale=-2:480,fps=25",
-    "-r", "25",
-    "-vsync", "1",
+    // ===== VIDEO & AUDIO COPY =====
+    "-c:v", "copy",
+    "-c:a", "copy",
+  
+    // تثبيت التوقيت فقط
     "-fps_mode", "cfr",
-    
-    // 🔥 تخفيض البت بشكل آمن
-    "-b:v", "1200k",
-    "-maxrate", "1200k",
-    "-bufsize", "2400k",
-    
-    "-g", "50",
-    "-keyint_min", "50",
-    "-sc_threshold", "0",
-    
-    // ===== AUDIO (STABLE) =====
-    "-c:a", "aac",
-    "-b:a", "96k",
-    "-ar", "44100",
-    "-ac", "2",
-    "-af", "aresample=async=1:first_pts=0",
-    
+    "-vsync", "1",
+  
     // ===== FACEBOOK =====
     "-f", "flv",
     "-flvflags", "no_duration_filesize",
     "-rtmp_live", "live",
     "-flush_packets", "0",
-    "-max_muxing_queue_size", "1024",
-    
-    "-loglevel", "warning",
-    
+  
+    "-loglevel", "error",
+  
     cache.stream_url
   ];
+  
   const args = [...inputArgs, ...outputArgs];
 
   log(`▶ Spawning ffmpeg for ${item.name}: ffmpeg ${args.join(" ")}`);
