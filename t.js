@@ -630,7 +630,7 @@ async function startFFmpeg(item, force = false) {
   }, CONFIG.connectTimeout);
 
   try {
-    child = spawn("ffmpeg", ffmpegArgs, { stdio: ["ignore", "pipe", "pipe"] });
+    child = spawn("ffmpeg", args, { stdio: ["ignore", "pipe", "pipe"] });
   } catch (err) {
     log(`❌ spawn() failed for ${item.name}: ${err.message}`);
     ensureReleaseSlot();
