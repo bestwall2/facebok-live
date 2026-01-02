@@ -558,8 +558,7 @@ async function startFFmpeg(item, force = false) {
 
   // Build input args based on source type
   const source = item.source || "";
-  const inputArgs = buildInputArgsForSource(source);
-
+  
   const inputArgs = buildInputArgsForSource(source);
 
   const outputArgs = [
