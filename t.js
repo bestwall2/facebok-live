@@ -424,14 +424,30 @@ function buildInputArgsForSource(source) {
     // If it looks like HLS we handled it earlier, otherwise treat as progressive/http stream
     return [
       "-user_agent", getUserAgent("default"),
+    
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_delay_max", "10",
+      "-reconnect_at_eof", "1",
+    
+      "-multiple_requests", "1",
+    
       "-timeout", "10000000",
-      "-analyzeduration", "5000000",
-      "-probesize", "5000000",
-      "-fflags", "+genpts+discardcorrupt",
-      "-err_detect", "ignore_err",
+      "-rw_timeout", "15000000",
+    
+      "-fflags", "+genpts+igndts+discardcorrupt",
+      "-flags", "low_delay",
+    
+      "-use_wallclock_as_timestamps", "1",
+    
+      "-max_delay", "30000000",
+      "-thread_queue_size", "16384",
+    
+      "-analyzeduration", "10M",
+      "-probesize", "10M",
+    
+      "-itsoffset", "0",
+    
       "-i", s
     ];
   }
