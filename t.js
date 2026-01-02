@@ -403,30 +403,38 @@ function buildInputArgsForSource(source) {
   }
 
   // ================= HTTP PROGRESSIVE (FIXED) =================
-  if (/^https?:\/\//i.test(s)) {
+    // ================= MPEG-TS over HTTP (BROADCAST FIX) =================
+  if (/^https?:\/\//i.test(s) && s.toLowerCase().includes(".ts")) {
     return [
-      "-re", // 🔥 CRITICAL FIX
-
+      // Pace input like live TV
+      "-re",
+  
       "-user_agent", getUserAgent("default"),
-
+  
+      // Reconnect safety
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "10",
-
+  
       "-rw_timeout", "15000000",
-
-      "-thread_queue_size", "2048",
-      "-analyzeduration", "3M",
-      "-probesize", "3M",
-
+  
+      // TS MUST have smaller buffers
+      "-thread_queue_size", "1024",
+      "-analyzeduration", "2M",
+      "-probesize", "2M",
+  
+      // Timestamp repair (CRITICAL)
       "-fflags", "+genpts+discardcorrupt",
       "-avoid_negative_ts", "make_zero",
+  
+      // Drop broken TS packets silently
       "-err_detect", "ignore_err",
-
+  
       "-i", s
     ];
   }
+
 
   // ================= RTMP / GENERIC =================
   if (lower.startsWith("rtmp://") || lower.startsWith("rtmps://")) {
