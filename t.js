@@ -364,6 +364,104 @@ function getUserAgent(type = "default") {
    It returns an array of FFmpeg args that should be placed before the output args.
 */
 
+function buildHttpTsArgs(url) {
+  return [
+    "-user_agent", getUserAgent(),
+
+    // ---- NETWORK STABILITY ----
+    "-rw_timeout", "20000000",
+    "-timeout", "20000000",
+    "-reconnect", "1",
+    "-reconnect_streamed", "1",
+    "-reconnect_delay_max", "5",
+
+    // ---- FORCE MPEG-TS ----
+    "-f", "mpegts",
+
+    // ---- TIMESTAMP FIX ----
+    "-fflags", "+genpts+igndts+discardcorrupt",
+    "-avoid_negative_ts", "make_zero",
+    "-copyts", "0",
+
+    // ---- BUFFER ----
+    "-thread_queue_size", "16384",
+    "-max_delay", "5000000",
+    "-analyzeduration", "3M",
+    "-probesize", "3M",
+
+    // ---- ERROR TOLERANCE ----
+    "-err_detect", "ignore_err",
+
+    "-i", url
+  ];
+}
+
+function buildInputArgsForSource(source) {
+  const s = String(source || "").toLowerCase();
+
+  if (/^https?:\/\//.test(s) && s.includes(".ts")) {
+    return buildHttpTsArgs(source);
+  }
+
+  if (s.includes(".m3u8")) {
+    return [
+      "-user_agent", getUserAgent(),
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "10",
+      "-fflags", "+genpts+igndts",
+      "-thread_queue_size", "8192",
+      "-analyzeduration", "5M",
+      "-probesize", "5M",
+      "-i", source
+    ];
+  }
+
+  if (s.startsWith("rtmp://") || s.startsWith("rtmps://")) {
+    return [
+      "-user_agent", getUserAgent(),
+      "-rw_timeout", "15000000",
+      "-fflags", "+genpts+igndts",
+      "-thread_queue_size", "4096",
+      "-i", source
+    ];
+  }
+
+  if (s.startsWith("rtsp://")) {
+    return [
+      "-rtsp_transport", "tcp",
+      "-stimeout", "10000000",
+      "-fflags", "+genpts",
+      "-thread_queue_size", "4096",
+      "-i", source
+    ];
+  }
+
+  // LOCAL FILE ONLY
+  return [
+    "-re",
+    "-i", source
+  ];
+}
+
+function buildFacebookOutputArgs(streamUrl) {
+  return [
+    "-c:v", "copy",
+    "-c:a", "copy",
+
+    "-f", "flv",
+    "-flvflags", "no_duration_filesize",
+    "-rtmp_live", "live",
+
+    "-max_muxing_queue_size", "4096",
+    "-drop_pkts_on_overflow", "1",
+
+    "-loglevel", "error",
+    streamUrl
+  ];
+}
+
+/*
 function buildInputArgsForSource(source) {
   const s = String(source || "").trim();
   const lower = s.toLowerCase();
@@ -443,6 +541,7 @@ function buildInputArgsForSource(source) {
 
   return ["-re", "-i", s];
 }
+*/
 
 
 /*       updqte fqcebook post          */
@@ -550,28 +649,8 @@ async function startFFmpeg(item, force = false) {
   // Build input args based on source type
   const source = item.source || "";
   
-  const inputArgs = buildInputArgsForSource(source);
-
-  const outputArgs = [
-    // ===== VIDEO & AUDIO COPY =====
-    "-c:v", "copy",
-    "-c:a", "copy",
-  
-    // تثبيت التوقيت فقط
-    "-fps_mode", "cfr",
-    "-vsync", "1",
-  
-    // ===== FACEBOOK =====
-    "-f", "flv",
-    "-flvflags", "no_duration_filesize",
-    "-rtmp_live", "live",
-    "-flush_packets", "0",
-  
-    "-loglevel", "error",
-  
-    cache.stream_url
-  ];
-  
+  const inputArgs = buildInputArgsForSource(item.source);
+  const outputArgs = buildFacebookOutputArgs(cache.stream_url);
   const args = [...inputArgs, ...outputArgs];
 
   log(`▶ Spawning ffmpeg for ${item.name}: ffmpeg ${args.join(" ")}`);
