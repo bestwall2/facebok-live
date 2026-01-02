@@ -416,21 +416,15 @@ function buildInputArgsForSource(source) {
       "-reconnect_streamed", "1",
       "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "10",
-  
-      "-rw_timeout", "15000000",
-  
-      // TS MUST have smaller buffers
-      "-thread_queue_size", "1024",
-      "-analyzeduration", "2M",
-      "-probesize", "2M",
-  
-      // Timestamp repair (CRITICAL)
-      "-fflags", "+genpts+discardcorrupt",
-      "-avoid_negative_ts", "make_zero",
-  
-      // Drop broken TS packets silently
-      "-err_detect", "ignore_err",
-  
+    
+      "-multiple_requests", "1",
+    
+      "-thread_queue_size", "16384",
+      "-analyzeduration", "10M",
+      "-probesize", "10M",
+    
+      "-fflags", "+genpts+igndts+discardcorrupt",
+      "-use_wallclock_as_timestamps", "1",
       "-i", s
     ];
   }
