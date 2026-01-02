@@ -375,17 +375,16 @@ function buildInputArgsForSource(source) {
       "-user_agent", getUserAgent("default"),
       "-reconnect", "1",
       "-reconnect_streamed", "1",
-      "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "10",
-      "-rw_timeout", "15000000",
-
-      "-thread_queue_size", "2048",
-      "-analyzeduration", "3M",
-      "-probesize", "3M",
-
-      "-fflags", "+genpts+discardcorrupt",
-      "-avoid_negative_ts", "make_zero",
-
+      "-multiple_requests", "1",
+      "-timeout", "10000000",
+      
+      "-fflags", "+genpts+igndts",
+      "-max_delay", "30000000",        // 30 seconds buffer
+      "-thread_queue_size", "16384",
+      "-analyzeduration", "10M",
+      "-probesize", "10M",
+      "-itsoffset", "50",
       "-i", s
     ];
   }
@@ -406,10 +405,7 @@ function buildInputArgsForSource(source) {
     // ================= MPEG-TS over HTTP (BROADCAST FIX) =================
   if (/^https?:\/\//i.test(s) && s.toLowerCase().includes(".ts")) {
     return [
-      // Pace input like live TV
-      "-re",
-  
-      "-user_agent", getUserAgent("default"),  
+      "-user_agent", getUserAgent("default"),
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_delay_max", "10",
