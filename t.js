@@ -363,112 +363,16 @@ function getUserAgent(type = "default") {
    This function centralizes input-option sets per source type.
    It returns an array of FFmpeg args that should be placed before the output args.
 */
-
-function buildHttpTsArgs(url) {
-  return [
-    "-user_agent", getUserAgent(),
-
-    // ---- NETWORK STABILITY ----
-    "-rw_timeout", "20000000",
-    "-timeout", "20000000",
-    "-reconnect", "1",
-    "-reconnect_streamed", "1",
-    "-reconnect_delay_max", "5",
-
-    // ---- FORCE MPEG-TS ----
-    "-f", "mpegts",
-
-    // ---- TIMESTAMP FIX ----
-    "-fflags", "+genpts+igndts+discardcorrupt",
-    "-avoid_negative_ts", "make_zero",
-    "-copyts", "0",
-
-    // ---- BUFFER ----
-    "-thread_queue_size", "16384",
-    "-max_delay", "5000000",
-    "-analyzeduration", "3M",
-    "-probesize", "3M",
-
-    // ---- ERROR TOLERANCE ----
-    "-err_detect", "ignore_err",
-
-    "-i", url
-  ];
-}
-
-function buildInputArgsForSource(source) {
-  const s = String(source || "").toLowerCase();
-
-  if (/^https?:\/\//.test(s) && s.includes(".ts")) {
-    return buildHttpTsArgs(source);
-  }
-
-  if (s.includes(".m3u8")) {
-    return [
-      "-user_agent", getUserAgent(),
-      "-reconnect", "1",
-      "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "10",
-      "-fflags", "+genpts+igndts",
-      "-thread_queue_size", "8192",
-      "-analyzeduration", "5M",
-      "-probesize", "5M",
-      "-i", source
-    ];
-  }
-
-  if (s.startsWith("rtmp://") || s.startsWith("rtmps://")) {
-    return [
-      "-user_agent", getUserAgent(),
-      "-rw_timeout", "15000000",
-      "-fflags", "+genpts+igndts",
-      "-thread_queue_size", "4096",
-      "-i", source
-    ];
-  }
-
-  if (s.startsWith("rtsp://")) {
-    return [
-      "-rtsp_transport", "tcp",
-      "-stimeout", "10000000",
-      "-fflags", "+genpts",
-      "-thread_queue_size", "4096",
-      "-i", source
-    ];
-  }
-
-  // LOCAL FILE ONLY
-  return [
-    "-re",
-    "-i", source
-  ];
-}
-
-function buildFacebookOutputArgs(streamUrl) {
-  return [
-    "-c:v", "copy",
-    "-c:a", "copy",
-
-    "-f", "flv",
-    "-flvflags", "no_duration_filesize",
-    "-rtmp_live", "live",
-
-    "-max_muxing_queue_size", "4096",
-    "-drop_pkts_on_overflow", "1",
-
-    "-loglevel", "error",
-    streamUrl
-  ];
-}
-
-/*
 function buildInputArgsForSource(source) {
   const s = String(source || "").trim();
   const lower = s.toLowerCase();
+
+  // Detect file (local path) if it looks like a filesystem path (no scheme)
   const isLocalFile = /^[\w\-.:\\\/]+(\.\w+)?$/.test(s) && !/^[a-z]+:\/\//i.test(s);
 
-  // ================= HLS =================
+  // HLS detection
   if (/\.m3u8(\?|$)/i.test(s) || lower.includes("m3u8") || lower.includes("hls")) {
+    // const proxyUrl = `https://epservers.ahmed-dikha26.workers.dev/?url=${encodeURIComponent(s)}`;
     return [
       "-user_agent", getUserAgent("default"),
       "-reconnect", "1",
@@ -487,21 +391,37 @@ function buildInputArgsForSource(source) {
     ];
   }
 
-  // ================= RTSP =================
+  // RTSP
   if (lower.startsWith("rtsp://")) {
     return [
       "-rtsp_transport", "tcp",
       "-stimeout", "10000000",
-      "-thread_queue_size", "2048",
       "-fflags", "+genpts+discardcorrupt",
-      "-avoid_negative_ts", "make_zero",
       "-i", s
     ];
   }
 
-  // ================= HTTP PROGRESSIVE (FIXED) =================
-    // ================= MPEG-TS over HTTP (BROADCAST FIX) =================
-  if (/^https?:\/\//i.test(s) && s.toLowerCase().includes(".ts")) {
+  // SRT (srt://)
+  if (lower.startsWith("srt://")) {
+    return [
+      "-timeout", "10000000",
+      "-reconnect", "1",
+      "-fflags", "+genpts+discardcorrupt",
+      "-i", s
+    ];
+  }
+
+  // UDP/RTP (udp:// rtp://)
+  if (lower.startsWith("udp://") || lower.startsWith("rtp://")) {
+    return [
+      "-fflags", "+genpts+discardcorrupt",
+      "-i", s
+    ];
+  }
+
+  // HTTP(s) progressive (mp4, mkv served over http)
+  if (/^https?:\/\//i.test(s)) {
+    // If it looks like HLS we handled it earlier, otherwise treat as progressive/http stream
     return [
       "-user_agent", getUserAgent("default"),
       "-reconnect", "1",
@@ -516,33 +436,36 @@ function buildInputArgsForSource(source) {
     ];
   }
 
-
-  // ================= RTMP / GENERIC =================
-  if (lower.startsWith("rtmp://") || lower.startsWith("rtmps://")) {
+  // RTMP or other scheme-less input (treat as RTMP or generic)
+  if (lower.startsWith("rtmp://") || s.startsWith("rtmps://") || !isLocalFile) {
     return [
       "-user_agent", getUserAgent("default"),
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_delay_max", "10",
-      "-rw_timeout", "15000000",
-
-      "-thread_queue_size", "2048",
+      "-timeout", "10000000",
+      "-analyzeduration", "5000000",
+      "-probesize", "5000000",
       "-fflags", "+genpts+discardcorrupt",
-      "-avoid_negative_ts", "make_zero",
-
+      "-err_detect", "ignore_err",
       "-i", s
     ];
   }
 
-  // ================= LOCAL FILE =================
+  // Local file fallback
   if (isLocalFile) {
-    return ["-re", "-i", s];
+    return [
+      "-re",
+      "-i", s
+    ];
   }
 
-  return ["-re", "-i", s];
+  // Ultimate fallback: minimal input
+  return [
+    "-re",
+    "-i", s
+  ];
 }
-*/
-
 
 /*       updqte fqcebook post          */
 
@@ -646,11 +569,23 @@ async function startFFmpeg(item, force = false) {
   serverStates.set(item.id, "connecting");
   log(`⏳ ${item.name} is connecting (slot acquired). Waiting 5s before ffmpeg.spawn()...`);
 
+  // small pre-start wait to reduce tight bursts (keeps startup cadence smoother)
+ //await sleep(5000);
+
   // Build input args based on source type
   const source = item.source || "";
-  
-  const inputArgs = buildInputArgsForSource(item.source);
-  const outputArgs = buildFacebookOutputArgs(cache.stream_url);
+  const inputArgs = buildInputArgsForSource(source);
+
+  // Output (minimal requested)
+  const outputArgs = [
+    "-c:v", "copy",
+    "-c:a", "copy",
+    "-fps_mode", "cfr",
+    "-f", "flv",
+    "-loglevel", "error",
+    cache.stream_url
+  ];
+
   const args = [...inputArgs, ...outputArgs];
 
   log(`▶ Spawning ffmpeg for ${item.name}: ffmpeg ${args.join(" ")}`);
