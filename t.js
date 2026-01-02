@@ -409,22 +409,15 @@ function buildInputArgsForSource(source) {
       // Pace input like live TV
       "-re",
   
-      "-user_agent", getUserAgent("default"),
-  
-      // Reconnect safety
+      "-user_agent", getUserAgent("default"),  
       "-reconnect", "1",
       "-reconnect_streamed", "1",
-      "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "10",
-    
-      "-multiple_requests", "1",
-    
-      "-thread_queue_size", "16384",
-      "-analyzeduration", "10M",
-      "-probesize", "10M",
-    
-      "-fflags", "+genpts+igndts+discardcorrupt",
-      "-use_wallclock_as_timestamps", "1",
+      "-timeout", "10000000",
+      "-analyzeduration", "5000000",
+      "-probesize", "5000000",
+      "-fflags", "+genpts+discardcorrupt",
+      "-err_detect", "ignore_err",
       "-i", s
     ];
   }
