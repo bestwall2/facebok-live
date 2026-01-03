@@ -24,6 +24,8 @@ import { spawn } from "child_process";
 import os from "os";
 import process from "process";
 
+const crypto = require('crypto');
+
 /* ================= CONFIG ================= */
 
 const CONFIG = {
@@ -489,8 +491,6 @@ function buildInputArgsForSource(source) {
         "-reconnect", "1",
         "-reconnect_streamed", "1",
         "-reconnect_at_eof", "1",
-        "-reconnect_on_network_error", "1",
-        "-reconnect_on_http_error", "4xx,5xx",
         "-reconnect_delay_max", "10",
         "-timeout", "10000000",
         "-rw_timeout", "15000000",
