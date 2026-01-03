@@ -363,46 +363,109 @@ function getUserAgent(type = "default") {
    This function centralizes input-option sets per source type.
    It returns an array of FFmpeg args that should be placed before the output args.
 */
-
 function buildInputArgsForSource(source) {
   const s = String(source || "").trim();
   const lower = s.toLowerCase();
 
-  const isHttp = /^https?:\/\//i.test(s);
+  // Detect file (local path) if it looks like a filesystem path (no scheme)
+  const isLocalFile = /^[\w\-.:\\\/]+(\.\w+)?$/.test(s) && !/^[a-z]+:\/\//i.test(s);
+
+  // HLS detection
+  if (/\.m3u8(\?|$)/i.test(s) || lower.includes("m3u8") || lower.includes("hls")) {
+    // const proxyUrl = `https://epservers.ahmed-dikha26.workers.dev/?url=${encodeURIComponent(s)}`;
     return [
       "-user_agent", getUserAgent("default"),
-
-      /* ==== RECONNECT FOREVER ==== */
       "-reconnect", "1",
       "-reconnect_streamed", "1",
-      "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "10",
-
-      /* ==== NETWORK BUFFER ==== */
-      "-timeout", "20000000",
-      "-rw_timeout", "30000000",
-
-      /* ==== ERROR TOLERANCE ==== */
-      "-fflags", "+genpts+discardcorrupt+ignidx",
-      "-err_detect", "ignore_err",
-      "-ignore_unknown", "1",
-
-      /* ==== BUFFER (REAL) ==== */
-      "-thread_queue_size", "32768",
-      "-max_delay", "15000000",
-
-      /* ==== COPY SAFE ==== */
-      "-copyts", "1",
-      "-avoid_negative_ts", "make_zero",
-
-      /* ==== FAST RECOVERY ==== */
-      "-analyzeduration", "2M",
-      "-probesize", "2M",
-
+      "-multiple_requests", "1",
+      "-timeout", "10000000",
+      
+      "-fflags", "+genpts+igndts",
+      "-max_delay", "30000000",        // 30 seconds buffer
+      "-thread_queue_size", "16384",
+      "-analyzeduration", "10M",
+      "-probesize", "10M",
+      "-itsoffset", "50",
       "-i", s
     ];
-}
+  }
 
+  // RTSP
+  if (lower.startsWith("rtsp://")) {
+    return [
+      "-rtsp_transport", "tcp",
+      "-stimeout", "10000000",
+      "-fflags", "+genpts+discardcorrupt",
+      "-i", s
+    ];
+  }
+
+  // SRT (srt://)
+  if (lower.startsWith("srt://")) {
+    return [
+      "-timeout", "10000000",
+      "-reconnect", "1",
+      "-fflags", "+genpts+discardcorrupt",
+      "-i", s
+    ];
+  }
+
+  // UDP/RTP (udp:// rtp://)
+  if (lower.startsWith("udp://") || lower.startsWith("rtp://")) {
+    return [
+      "-fflags", "+genpts+discardcorrupt",
+      "-i", s
+    ];
+  }
+
+  // HTTP(s) progressive (mp4, mkv served over http)
+  if (/^https?:\/\//i.test(s)) {
+    // If it looks like HLS we handled it earlier, otherwise treat as progressive/http stream
+    return [
+      "-user_agent", getUserAgent("default"),
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "10",
+      "-timeout", "10000000",
+      "-analyzeduration", "5000000",
+      "-probesize", "5000000",
+      "-fflags", "+genpts+discardcorrupt",
+      "-err_detect", "ignore_err",
+      "-i", s
+    ];
+  }
+
+  // RTMP or other scheme-less input (treat as RTMP or generic)
+  if (lower.startsWith("rtmp://") || s.startsWith("rtmps://") || !isLocalFile) {
+    return [
+      "-user_agent", getUserAgent("default"),
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "10",
+      "-timeout", "10000000",
+      "-analyzeduration", "5000000",
+      "-probesize", "5000000",
+      "-fflags", "+genpts+discardcorrupt",
+      "-err_detect", "ignore_err",
+      "-i", s
+    ];
+  }
+
+  // Local file fallback
+  if (isLocalFile) {
+    return [
+      "-re",
+      "-i", s
+    ];
+  }
+
+  // Ultimate fallback: minimal input
+  return [
+    "-re",
+    "-i", s
+  ];
+}
 
 /*       updqte fqcebook post          */
 
@@ -517,10 +580,9 @@ async function startFFmpeg(item, force = false) {
   const outputArgs = [
     "-c:v", "copy",
     "-c:a", "copy",
+    "-fps_mode", "cfr",
     "-f", "flv",
-    "-loglevel", "warning",
-    "-stats",
-    "-stats_period", "5",
+    "-loglevel", "error",
     cache.stream_url
   ];
 
