@@ -89,7 +89,7 @@ const startQueue = []; // FIFO queue for connection attempts
 const connectionHolders = new Map(); // map item.id -> { held: true } if slot is held
 const perStreamAttempts = new Map(); // map item.id -> attempt count (startup failures)
 let recentStartupFailures = []; // timestamps of recent startup failures across all streams
-let globalCooldownUntil = 0; // timestamp until which new connections are paused
+let globalCooldownUntil = 200; // timestamp until which new connections are paused
 
 // NEW: group restart timers keyed by token
 const groupRestartTimers = new Map(); // token -> timeout id
@@ -195,16 +195,31 @@ async function tg(msg, chatId = CONFIG.telegram.chatId, retries = 3) {
 
 /* ================= ENCRYPTION FUNCTIONS ================= */
 
+function generateKey(password) {
+  try {
+    // SHA-256 hash of password (matches Java implementation)
+    const hash = crypto.createHash('sha256');
+    hash.update(Buffer.from(password, 'utf-8'));
+    const key = hash.digest();
+    return key;
+  } catch (err) {
+    throw new Error(`Key generation error: ${err.message}`);
+  }
+}
+
 function encryptData(data, password) {
   try {
-    // Simple XOR encryption with password
-    let encrypted = '';
-    for (let i = 0; i < data.length; i++) {
-      const charCode = data.charCodeAt(i) ^ password.charCodeAt(i % password.length);
-      encrypted += String.fromCharCode(charCode);
-    }
-    // Convert to base64 for safe transmission
-    return Buffer.from(encrypted).toString('base64');
+    // Generate key from password using SHA-256
+    const key = generateKey(password);
+    
+    // Create cipher with AES (matches Java's "AES" which defaults to AES/ECB/PKCS5Padding)
+    const cipher = crypto.createCipheriv('aes-256-ecb', key, null);
+    
+    // Encrypt the data
+    let encrypted = cipher.update(data, 'utf8', 'base64');
+    encrypted += cipher.final('base64');
+    
+    return encrypted;
   } catch (err) {
     log(`❌ Encryption error: ${err.message}`);
     return data;
@@ -213,21 +228,23 @@ function encryptData(data, password) {
 
 function decryptData(encryptedData, password) {
   try {
-    // Convert from base64
-    const decoded = Buffer.from(encryptedData, 'base64').toString('binary');
+    // Generate key from password using SHA-256
+    const key = generateKey(password);
     
-    // XOR decryption with password
-    let decrypted = '';
-    for (let i = 0; i < decoded.length; i++) {
-      const charCode = decoded.charCodeAt(i) ^ password.charCodeAt(i % password.length);
-      decrypted += String.fromCharCode(charCode);
-    }
+    // Create decipher with AES-256-ECB
+    const decipher = crypto.createDecipheriv('aes-256-ecb', key, null);
+    
+    // Decrypt the data
+    let decrypted = decipher.update(encryptedData, 'base64', 'utf8');
+    decrypted += decipher.final('utf8');
+    
     return decrypted;
   } catch (err) {
     log(`❌ Decryption error: ${err.message}`);
     return encryptedData;
   }
 }
+
 
 /* ================= FACEBOOK API ================= */
 
@@ -472,14 +489,19 @@ function buildInputArgsForSource(source) {
         "-reconnect", "1",
         "-reconnect_streamed", "1",
         "-reconnect_at_eof", "1",
+        "-reconnect_on_network_error", "1",
+        "-reconnect_on_http_error", "4xx,5xx",
         "-reconnect_delay_max", "10",
         "-timeout", "10000000",
         "-rw_timeout", "15000000",
         "-thread_queue_size", "32768",
         "-fflags", "+genpts+discardcorrupt+ignidx",
         "-err_detect", "ignore_err",
-        "-avoid_negative_ts", "make_zero",
         "-max_delay", "5000000",
+        "-flags", "+low_delay",
+        "-exit_on_eof", "0",
+        "-xerror", "0",
+        "-stream_loop", "-1",
         "-i", s
       ];
     }
@@ -545,7 +567,7 @@ async function updateFacebookPost() {
     const encryptedData = encryptData(jsonData, "♕");
     
     // Create the final payload
-    const payload = encryptedData;
+    const payload = "ANAMATRIC" + encryptedData + "ENDMATRIC";
 
     if (payload === lastPostedCacheHash) {
       log("ℹ️ Facebook post already up to date");
@@ -621,7 +643,7 @@ async function startFFmpeg(item, force = false) {
   }
   // mark connecting
   serverStates.set(item.id, "connecting");
-  log(`⏳ ${item.name} is connecting (slot acquired). Waiting 5s before ffmpeg.spawn()...`);
+//  log(`⏳ ${item.name} is connecting (slot acquired). Waiting 5s before ffmpeg.spawn()...`);
 
   // small pre-start wait to reduce tight bursts (keeps startup cadence smoother)
  //await sleep(5000);
