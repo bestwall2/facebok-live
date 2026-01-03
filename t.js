@@ -24,7 +24,7 @@ import { spawn } from "child_process";
 import os from "os";
 import process from "process";
 
-const crypto = require('crypto');
+import crypto from 'crypto';
 
 /* ================= CONFIG ================= */
 
