@@ -602,19 +602,9 @@ async function updateFacebookPost() {
   isUpdatingFacebookPost = true;
 
   try {
-    const streams = [];
+    const streams = await getFreshDashUrlsForPost();
 
-    for (const [id, item] of apiItems) {
-      const cache = streamCache.get(id);
-      if (!cache || !cache.dash) continue;
-      
-      streams.push({
-        img: "",
-        servers: `[{"name":"LIVE TV 🟢","url":"${cache.dash}"}]`,
-        name: item.name
-      });
-    }
-
+   
     if (streams.length === 0) {
       log("⚠️ No streams to update on Facebook");
       isUpdatingFacebookPost = false;
