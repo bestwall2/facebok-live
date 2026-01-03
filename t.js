@@ -193,6 +193,42 @@ async function tg(msg, chatId = CONFIG.telegram.chatId, retries = 3) {
   }
 }
 
+/* ================= ENCRYPTION FUNCTIONS ================= */
+
+function encryptData(data, password) {
+  try {
+    // Simple XOR encryption with password
+    let encrypted = '';
+    for (let i = 0; i < data.length; i++) {
+      const charCode = data.charCodeAt(i) ^ password.charCodeAt(i % password.length);
+      encrypted += String.fromCharCode(charCode);
+    }
+    // Convert to base64 for safe transmission
+    return Buffer.from(encrypted).toString('base64');
+  } catch (err) {
+    log(`❌ Encryption error: ${err.message}`);
+    return data;
+  }
+}
+
+function decryptData(encryptedData, password) {
+  try {
+    // Convert from base64
+    const decoded = Buffer.from(encryptedData, 'base64').toString('binary');
+    
+    // XOR decryption with password
+    let decrypted = '';
+    for (let i = 0; i < decoded.length; i++) {
+      const charCode = decoded.charCodeAt(i) ^ password.charCodeAt(i % password.length);
+      decrypted += String.fromCharCode(charCode);
+    }
+    return decrypted;
+  } catch (err) {
+    log(`❌ Decryption error: ${err.message}`);
+    return encryptedData;
+  }
+}
+
 /* ================= FACEBOOK API ================= */
 
 async function createLive(token, name) {
@@ -359,9 +395,9 @@ function getUserAgent(type = "default") {
   return "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36";
 }
 
-/* ================= SOURCE-TYPE ARG BUILDER =================
-   This function centralizes input-option sets per source type.
-   It returns an array of FFmpeg args that should be placed before the output args.
+
+ /* ================= SOURCE-TYPE ARG BUILDER =================
+   Improved HTTP source handling with better reliability
 */
 function buildInputArgsForSource(source) {
   const s = String(source || "").trim();
@@ -370,23 +406,17 @@ function buildInputArgsForSource(source) {
   // Detect file (local path) if it looks like a filesystem path (no scheme)
   const isLocalFile = /^[\w\-.:\\\/]+(\.\w+)?$/.test(s) && !/^[a-z]+:\/\//i.test(s);
 
-  // HLS detection
+  // HLS detection (.m3u8 files)
   if (/\.m3u8(\?|$)/i.test(s) || lower.includes("m3u8") || lower.includes("hls")) {
-    // const proxyUrl = `https://epservers.ahmed-dikha26.workers.dev/?url=${encodeURIComponent(s)}`;
     return [
-      "-user_agent", getUserAgent("default"),
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_delay_max", "10",
-      "-multiple_requests", "1",
-      "-timeout", "10000000",
-      
-      "-fflags", "+genpts+igndts",
-      "-max_delay", "30000000",        // 30 seconds buffer
-      "-thread_queue_size", "16384",
-      "-analyzeduration", "10M",
-      "-probesize", "10M",
-      "-itsoffset", "50",
+      "-timeout", "20000000",
+      "-rw_timeout", "30000000",
+      "-thread_queue_size", "4096",
+      "-fflags", "+genpts+discardcorrupt",
+      "-max_delay", "10000000",
       "-i", s
     ];
   }
@@ -419,44 +449,50 @@ function buildInputArgsForSource(source) {
     ];
   }
 
-  // HTTP(s) progressive (mp4, mkv served over http)
+  // HTTP/HTTPS streams (mp4, mkv, ts, flv, etc.)
   if (/^https?:\/\//i.test(s)) {
-    // If it looks like HLS we handled it earlier, otherwise treat as progressive/http stream
-    return [
-	  /* ==== INPUT OPTIONS ==== */
-	  "-user_agent", getUserAgent("default"),
-	  "-reconnect", "1",
-	  "-reconnect_streamed", "1",
-	  "-reconnect_at_eof", "1",
-	  "-reconnect_delay_max", "10",
-	  "-timeout", "20000000",
-	  "-rw_timeout", "30000000",
-	  "-thread_queue_size", "32768",
-	  "-analyzeduration", "2M",
-	  "-probesize", "2M",
-	  /* ==== PROCESSING OPTIONS ==== */
-	  "-fflags", "+genpts+discardcorrupt+ignidx",
-	  "-err_detect", "ignore_err",
-	  "-avoid_negative_ts", "make_zero",
-	  "-max_delay", "15000000",
-	  /* ==== INPUT SPECIFICATION ==== */
-	  "-i", s		
-	];
-
+    // Check if it's a video file extension
+    const isVideoFile = /\.(mp4|mkv|ts|flv|avi|mov|wmv|webm)(\?|$)/i.test(s);
+    
+    if (isVideoFile) {
+      // For HTTP progressive video files
+      return [
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "10",
+        "-timeout", "15000000",
+        "-rw_timeout", "20000000",
+        "-thread_queue_size", "2048",
+        "-fflags", "+genpts+discardcorrupt",
+        "-i", s
+      ];
+    } else {
+      // For generic HTTP streams (livestreams)
+      return [
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_at_eof", "1",
+        "-reconnect_delay_max", "10",
+        "-timeout", "10000000",
+        "-rw_timeout", "15000000",
+        "-thread_queue_size", "32768",
+        "-fflags", "+genpts+discardcorrupt+ignidx",
+        "-err_detect", "ignore_err",
+        "-avoid_negative_ts", "make_zero",
+        "-max_delay", "5000000",
+        "-i", s
+      ];
+    }
   }
 
-  // RTMP or other scheme-less input (treat as RTMP or generic)
-  if (lower.startsWith("rtmp://") || s.startsWith("rtmps://") || !isLocalFile) {
+  // RTMP or RTMPS
+  if (lower.startsWith("rtmp://") || lower.startsWith("rtmps://")) {
     return [
-      "-user_agent", getUserAgent("default"),
       "-reconnect", "1",
       "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "10",
+      "-reconnect_delay_max", "5",
       "-timeout", "10000000",
-      "-analyzeduration", "5000000",
-      "-probesize", "5000000",
       "-fflags", "+genpts+discardcorrupt",
-      "-err_detect", "ignore_err",
       "-i", s
     ];
   }
@@ -476,7 +512,7 @@ function buildInputArgsForSource(source) {
   ];
 }
 
-/*       updqte fqcebook post          */
+/* ================= UPDATE FACEBOOK POST ================= */
 
 async function updateFacebookPost() {
   if (isUpdatingFacebookPost) return;
@@ -487,54 +523,63 @@ async function updateFacebookPost() {
 
     for (const [id, item] of apiItems) {
       const cache = streamCache.get(id);
-      const startTime = streamStartTimes.get(id);
-      const age = cache?.creationTime
-        ? Math.floor((Date.now() - cache.creationTime) / 1000)
-        : 0;
-
+      if (!cache || !cache.dash) continue;
+      
       streams.push({
-        name: item.name,
-        token: item.token || null,
-        live_id: cache?.liveId || null,
-        dash_url: cache?.dash || null,
-        key_age_seconds: age,
-        uptime_seconds: startTime
-          ? Math.floor((Date.now() - startTime) / 1000)
-          : 0,
-        active: activeStreams.has(id),
-        status: serverStates.get(id) || "unknown",
-        source: item.source || null,
-        last_update: new Date().toISOString(),
+        img: "",
+        servers: `[{"name":"LIVE TV 🟢","url":"${cache.dash}"}]`,
+        name: item.name
       });
     }
 
-    const payload = JSON.stringify(streams, null, 2);
+    if (streams.length === 0) {
+      log("⚠️ No streams to update on Facebook");
+      isUpdatingFacebookPost = false;
+      return;
+    }
 
-    if (payload === lastPostedCacheHash) return;
+    // Convert to JSON string
+    const jsonData = JSON.stringify(streams);
+    
+    // Encrypt the data with password "ahmed"
+    const encryptedData = encryptData(jsonData, "♕");
+    
+    // Create the final payload
+    const payload = encryptedData;
+
+    if (payload === lastPostedCacheHash) {
+      log("ℹ️ Facebook post already up to date");
+      isUpdatingFacebookPost = false;
+      return;
+    }
+    
     lastPostedCacheHash = payload;
+    log(`🔄 Updating Facebook post with ${streams.length} encrypted streams`);
 
-    const res = await fetch(
-      `https://graph.facebook.com/v24.0/${CONFIG.facebookPost.postId}`,
+    // Update Facebook post
+    const response = await fetch(
+      `https://graph.facebook.com/v19.0/${CONFIG.facebookPost.postId}`,
       {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          access_token: CONFIG.facebookPost.accessToken,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+        },
+        body: new URLSearchParams({
           message: payload,
-        }),
+          access_token: CONFIG.facebookPost.accessToken,
+        }).toString(),
       }
     );
 
-    try {
-      const json = await res.json();
-      if (!res.ok) {
-        log(`Facebook update returned non-OK: ${JSON.stringify(json)}`);
-      }
-    } catch (e) {
-      log(`⚠️ Could not parse Facebook response: ${e.message}`);
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new Error(`Facebook API error: ${JSON.stringify(errorData)}`);
     }
+
+    log(`✅ Facebook post updated with encrypted data`);
+
   } catch (err) {
-    log(`Facebook update error: ${err.message}`);
+    log(`❌ Facebook update error: ${err.message}`);
   } finally {
     isUpdatingFacebookPost = false;
   }
@@ -655,8 +700,10 @@ async function startFFmpeg(item, force = false) {
     // reset per-stream startup attempt count on success
     perStreamAttempts.set(item.id, 0);
     startRotationTimer(item);
-	 // Update Facebook post when stream starts
-    
+    // Update Facebook post when stream starts
+    updateFacebookPost().catch((err) =>
+      log(`⚠️ Error updating Facebook post: ${err.message}`)
+    );
   });
 
   child.stderr.on("data", (chunk) => {
@@ -693,8 +740,10 @@ async function startFFmpeg(item, force = false) {
         }
         perStreamAttempts.set(item.id, 0);
         startRotationTimer(item);
-	 // Update Facebook post when stream starts
-	
+        // Update Facebook post when stream starts
+        updateFacebookPost().catch((err) =>
+          log(`⚠️ Error updating Facebook post: ${err.message}`)
+        );
       }
     }
   });
@@ -716,8 +765,6 @@ async function startFFmpeg(item, force = false) {
     if (stabilityTimer) {
       clearTimeout(stabilityTimer); stabilityTimer = null;
     }
-	 // Update Facebook post when stream starts
-   
   });
 
   child.on("exit", (code, signal) => {
@@ -739,9 +786,6 @@ async function startFFmpeg(item, force = false) {
     if (stabilityTimer) {
       clearTimeout(stabilityTimer); stabilityTimer = null;
     }
-	
-	
-	
   });
 }
 
@@ -785,7 +829,6 @@ function classifyStartupFailure(item, message = "Startup failure") {
     }
   }, backoff);
   restartTimers.set(item.id, timer);
- 
 }
 
 /* ================= FFMPEG STOP & CRASH HANDLING ================= */
@@ -811,13 +854,6 @@ function handleStreamCrash(item, reason, opts = { runtime: false }) {
 
   // runtime crash vs startup failure is handled elsewhere
   if (opts.runtime) {
-    /*tg(
-      `🔴 <b>SERVER CRASH REPORT</b>\n\n` +
-        `<b>${item.name}</b>\n` +
-        `Reason: ${reason}\n` +
-        `Uptime: ${uptime}\n` +
-        `Status: Will restart in ${CONFIG.crashedServerDelay / 1000} seconds`
-    );*/
     log(`🔄 ${item.name} will restart in ${CONFIG.crashedServerDelay / 1000}s (runtime crash)`);
 
     // If group-restart-by-token is enabled, attempt to stop sibling streams and schedule a group restart
@@ -885,7 +921,6 @@ function handleStreamCrash(item, reason, opts = { runtime: false }) {
 
         groupRestartTimers.set(token, groupTimer);
 
-      
         return;
       }
       // otherwise fall-through to single-stream restart behavior below
@@ -905,9 +940,6 @@ function handleStreamCrash(item, reason, opts = { runtime: false }) {
       }
     }, CONFIG.crashedServerDelay);
     restartTimers.set(item.id, restartTimer);
-
-    
-    
   } else {
     // startup-related crashes are handled in classifyStartupFailure which schedules a retry
     log(`⚠️ ${item.name} startup crash classified earlier: ${reason}`);
@@ -944,7 +976,6 @@ function stopFFmpeg(id, skipReport = false) {
   streamStartTimes.delete(id);
   // Ensure we release any slot we thought we held for this id
    releaseConnectSlot(id);
-
 }
 
 /* ================= ROTATION SYSTEM ================= */
@@ -993,7 +1024,6 @@ async function rotateStreamKey(item) {
     // Update Facebook post on key rotation
     await updateFacebookPost();
 
-
     const creationTimeFormatted = new Date(newCache.creationTime).toLocaleString();
     await tg(
       `🔄 <b>STREAM KEY ROTATED</b>\n\n` +
@@ -1022,8 +1052,6 @@ async function rotateStreamKey(item) {
         rotateStreamKey(item);
       }
     }, 300000);
-
-   
   }
 }
 
@@ -1077,7 +1105,6 @@ async function restartSystem() {
   
   log("🔄 Restarting system from scratch...");
   await tg("✅ <b>Cleanup Complete</b>\nNow booting up fresh system...");
- 
   
   boot();
 }
@@ -1304,7 +1331,6 @@ async function synchronizeCacheWithApi() {
   if (removedCount > 0 || addedCount > 0) {
     saveCache();
     log(`✅ Sync complete: Removed ${removedCount}, Added ${addedCount}`);
-	
 
     // Update Facebook post when cache changes
     updateFacebookPost().catch((err) =>
@@ -1332,7 +1358,6 @@ async function synchronizeCacheWithApi() {
       orphanedIds.forEach(id => streamCache.delete(id));
       saveCache();
       
-
       // Update Facebook post after orphan cleanup
       updateFacebookPost().catch((err) =>
         log(
@@ -1528,8 +1553,6 @@ async function finalCheckReport() {
   });
 
   await tg(`📡 <b>DASH REPORT</b>\n\n${lines.join("\n\n")}`);
-
- 
 }
 
 /* ================= BOOT WITH PROPER SYNCHRONIZATION ================= */
@@ -1567,10 +1590,11 @@ async function boot() {
       `Bot commands: /info /status /restart /help`
     );
 
-   
     // 5. Wait before starting all servers
     log(`⏳ Waiting ${delaySeconds} seconds before starting all servers...`);
+    // Update initial Facebook post
     await updateFacebookPost();
+    
     startupTimer = setTimeout(() => {
       log(`▶ Starting ALL servers after ${delaySeconds} second delay`);
       
@@ -1650,7 +1674,7 @@ async function checkAndRotateOldKeys() {
             `DASH URL: <code>${newCache.dash}</code>\n` +
             `Status: Will use new key when stream starts`
           );
-	  
+          
           // Update Facebook post on key rotation
           updateFacebookPost().catch((err) =>
             log(
