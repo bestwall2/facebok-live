@@ -442,7 +442,6 @@ function buildInputArgsForSource(source) {
 	  "-fflags", "+genpts+discardcorrupt+ignidx",
 	  "-err_detect", "ignore_err",
 	  "-ignore_unknown", "1",
-	  "-copyts",
 	  "-avoid_negative_ts", "make_zero",
 	  "-max_delay", "15000000"
 	];
