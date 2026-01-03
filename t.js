@@ -363,130 +363,128 @@ function getUserAgent(type = "default") {
    This function centralizes input-option sets per source type.
    It returns an array of FFmpeg args that should be placed before the output args.
 */
+
 function buildInputArgsForSource(source) {
   const s = String(source || "").trim();
   const lower = s.toLowerCase();
 
-  // Detect file (local path) if it looks like a filesystem path (no scheme)
-  const isLocalFile = /^[\w\-.:\\\/]+(\.\w+)?$/.test(s) && !/^[a-z]+:\/\//i.test(s);
+  const isHttp = /^https?:\/\//i.test(s);
+  const isHls = /\.m3u8(\?|$)/i.test(s) || lower.includes("m3u8");
+  const isTs = /\.ts(\?|$)/i.test(s);
+  const isRtsp = lower.startsWith("rtsp://");
+  const isRtmp = lower.startsWith("rtmp://") || lower.startsWith("rtmps://");
+  const isSrt = lower.startsWith("srt://");
+  const isUdp = lower.startsWith("udp://") || lower.startsWith("rtp://");
 
-  // HLS detection
-  if (/\.m3u8(\?|$)/i.test(s) || lower.includes("m3u8") || lower.includes("hls")) {
-    // const proxyUrl = `https://epservers.ahmed-dikha26.workers.dev/?url=${encodeURIComponent(s)}`;
+  /* ================= HLS ================= */
+  if (isHttp && isHls) {
     return [
       "-user_agent", getUserAgent("default"),
+
       "-reconnect", "1",
       "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "10",
-      "-multiple_requests", "1",
-      "-timeout", "10000000",
-      
-      "-fflags", "+genpts+igndts",
-      "-max_delay", "30000000",        // 30 seconds buffer
-      "-thread_queue_size", "16384",
-      "-analyzeduration", "10M",
-      "-probesize", "10M",
-      "-itsoffset", "50",
+      "-reconnect_delay_max", "5",
+
+      "-timeout", "15000000",
+      "-rw_timeout", "20000000",
+
+      "-fflags", "+genpts+discardcorrupt",
+      "-err_detect", "ignore_err",
+
+      "-thread_queue_size", "8192",
+      "-max_delay", "5000000",
+
+      "-analyzeduration", "2M",
+      "-probesize", "2M",
+
       "-i", s
     ];
   }
 
-  // RTSP
-  if (lower.startsWith("rtsp://")) {
+  /* ================= HTTP TS (WEAK INTERNET) ================= */
+  if (isHttp && isTs) {
+    return [
+      "-user_agent", getUserAgent("default"),
+
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_at_eof", "1",
+      "-reconnect_delay_max", "10",
+
+      "-timeout", "20000000",
+      "-rw_timeout", "30000000",
+
+      "-fflags", "+genpts+discardcorrupt+ignidx",
+      "-err_detect", "ignore_err",
+      "-ignore_unknown", "1",
+
+      "-thread_queue_size", "32768",
+      "-max_delay", "15000000",
+
+      "-copyts", "1",
+      "-avoid_negative_ts", "make_zero",
+
+      "-analyzeduration", "2M",
+      "-probesize", "2M",
+
+      "-i", s
+    ];
+  }
+
+  /* ================= RTSP ================= */
+  if (isRtsp) {
     return [
       "-rtsp_transport", "tcp",
-      "-stimeout", "10000000",
-      "-fflags", "+genpts+discardcorrupt",
-      "-i", s
-    ];
-  }
-
-  // SRT (srt://)
-  if (lower.startsWith("srt://")) {
-    return [
-      "-timeout", "10000000",
-      "-reconnect", "1",
-      "-fflags", "+genpts+discardcorrupt",
-      "-i", s
-    ];
-  }
-
-  // UDP/RTP (udp:// rtp://)
-  if (lower.startsWith("udp://") || lower.startsWith("rtp://")) {
-    return [
-      "-fflags", "+genpts+discardcorrupt",
-      "-i", s
-    ];
-  }
-	
-// HTTP(s) TS — WEAK INTERNET BUFFER MODE
-if (/^https?:\/\//i.test(s)) {
-  return [
-    "-user_agent", getUserAgent("default"),
-
-    /* ===== RECONNECT (INFINITE) ===== */
-    "-reconnect", "1",
-    "-reconnect_streamed", "1",
-    "-reconnect_at_eof", "1",
-    "-reconnect_delay_max", "10",
-
-    /* ===== NETWORK BUFFER ===== */
-    "-timeout", "20000000",
-    "-rw_timeout", "30000000",
-
-    /* ===== ERROR TOLERANCE ===== */
-    "-fflags", "+genpts+discardcorrupt+ignidx",
-    "-err_detect", "ignore_err",
-    "-ignore_unknown", "1",
-
-    /* ===== BUFFERING (CRITICAL) ===== */
-    "-thread_queue_size", "32768",
-    "-max_delay", "15000000",
-
-    /* ===== TIMESTAMPS (COPY SAFE) ===== */
-    "-copyts", "1",
-    "-avoid_negative_ts", "make_zero",
-
-    /* ===== LOW PROBE (FAST RECOVERY) ===== */
-    "-analyzeduration", "2M",
-    "-probesize", "2M",
-
-    "-i", s
-  ];
-}
-
-	
-	
-  // RTMP or other scheme-less input (treat as RTMP or generic)
-  if (lower.startsWith("rtmp://") || s.startsWith("rtmps://") || !isLocalFile) {
-    return [
-      "-user_agent", getUserAgent("default"),
-      "-reconnect", "1",
-      "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "10",
-      "-timeout", "10000000",
-      "-analyzeduration", "5000000",
-      "-probesize", "5000000",
+      "-stimeout", "15000000",
       "-fflags", "+genpts+discardcorrupt",
       "-err_detect", "ignore_err",
       "-i", s
     ];
   }
 
-  // Local file fallback
-  if (isLocalFile) {
+  /* ================= SRT ================= */
+  if (isSrt) {
     return [
-      "-re",
+      "-timeout", "15000000",
+      "-fflags", "+genpts+discardcorrupt",
+      "-err_detect", "ignore_err",
       "-i", s
     ];
   }
 
-  // Ultimate fallback: minimal input
+  /* ================= UDP / RTP ================= */
+  if (isUdp) {
+    return [
+      "-fflags", "+genpts+discardcorrupt",
+      "-i", s
+    ];
+  }
+
+  /* ================= RTMP ================= */
+  if (isRtmp) {
+    return [
+      "-user_agent", getUserAgent("default"),
+
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "5",
+
+      "-timeout", "15000000",
+
+      "-fflags", "+genpts+discardcorrupt",
+      "-err_detect", "ignore_err",
+
+      "-i", s
+    ];
+  }
+
+  /* ================= LOCAL FILE ================= */
   return [
     "-re",
     "-i", s
   ];
 }
+
 
 /*       updqte fqcebook post          */
 
@@ -601,9 +599,10 @@ async function startFFmpeg(item, force = false) {
   const outputArgs = [
     "-c:v", "copy",
     "-c:a", "copy",
-    "-fps_mode", "cfr",
     "-f", "flv",
     "-loglevel", "warning",
+    "-stats",
+    "-stats_period", "5",
     cache.stream_url
   ];
 
