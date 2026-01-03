@@ -253,7 +253,7 @@ function decryptData(encryptedData, password) {
 async function createLive(token, name) {
   log(`🌐 Creating Facebook Live for: ${name}`);
 
-  const r = await fetch("https://graph.facebook.com/v24.0/me/live_videos", {
+  const r = await fetch("https://graph.facebook.com/v19.0/me/live_videos", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -277,7 +277,7 @@ async function getStreamAndDash(liveId, token) {
   for (let i = 0; i < 6; i++) {
     try {
       const r = await fetch(
-        `https://graph.facebook.com/v24.0/${liveId}?fields=${fields}&access_token=${token}`
+        `https://graph.facebook.com/v19.0/${liveId}?fields=${fields}&access_token=${token}`
       );
       const j = await r.json();
       if (j.stream_url) {
@@ -530,6 +530,69 @@ function buildInputArgsForSource(source) {
     "-re",
     "-i", s
   ];
+}
+
+/* THIS TO GET FRESH IMG ALSO DASH URL READY FOR POSTING*/
+
+/* ================= GET FRESH DASH URLS WITH IMAGES FOR JSON ================= */
+
+// Function to get fresh DASH URLs and image URLs for all active streams
+async function getFreshDashUrlsForPost() {
+  const freshStreams = [];
+  
+  for (const [id, item] of apiItems) {
+    const cache = streamCache.get(id);
+    if (!cache || !cache.liveId) continue;
+    
+    try {
+      // 1. Get fresh DASH URL from Facebook
+      const freshData = await getStreamAndDash(cache.liveId, item.token);
+      
+      // 2. Get the image URL from Facebook API (item.img)
+     
+      let imageUrl = "";
+      if (item.img) { // item.img contains Facebook post/photo ID
+        try {
+          // Use the stream's token to access the image
+          const imageRes = await fetch(
+            `https://graph.facebook.com/v19.0/${item.img}?fields=images&access_token=${item.token}`,
+            { timeout: 5000 }
+          );
+          
+          if (imageRes.ok) {
+            const imageData = await imageRes.json();
+            if (imageData?.images?.[0]?.source) {
+              imageUrl = imageData.images[0].source;
+              log(`✅ Got Facebook image URL for ${item.name}`);
+            }
+          }
+        } catch (imgError) {
+          log(`⚠️ Failed to get Facebook image for ${item.name}: ${imgError.message}`);
+        }
+      }
+      
+      freshStreams.push({
+        img: imageUrl, // Direct image URL from API
+        servers: `[{"name":"LIVE TV 🟢","url":"${freshData.dash}"}]`,
+        name: item.name
+      });
+      
+      log(`✅ Got fresh DASH URL for ${item.name}`);
+      
+    } catch (error) {
+      log(`⚠️ Failed to get fresh data for ${item.name}, using cached: ${error.message}`);
+      // Fallback to cached DASH URL, but still use API image
+      const imageUrl = item.img || ""; // Image from API
+      
+      freshStreams.push({
+        img: imageUrl,
+        servers: `[{"name":"LIVE TV 🟢","url":"${cache.dash}"}]`,
+        name: item.name
+      });
+    }
+  }
+  
+  return freshStreams;
 }
 
 /* ================= UPDATE FACEBOOK POST ================= */
@@ -1282,6 +1345,7 @@ async function fetchApiList() {
           name: streamData.name,
           token: streamData.token,
           source: streamData.source,
+          img : streamData.img,
         });
       });
     }
