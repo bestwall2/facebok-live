@@ -603,7 +603,7 @@ async function startFFmpeg(item, force = false) {
     "-c:a", "copy",
     "-fps_mode", "cfr",
     "-f", "flv",
-    "-loglevel", "error",
+    "-loglevel", "warning",
     cache.stream_url
   ];
 
