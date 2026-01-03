@@ -369,120 +369,38 @@ function buildInputArgsForSource(source) {
   const lower = s.toLowerCase();
 
   const isHttp = /^https?:\/\//i.test(s);
-  const isHls = /\.m3u8(\?|$)/i.test(s) || lower.includes("m3u8");
-  const isTs = /\.ts(\?|$)/i.test(s);
-  const isRtsp = lower.startsWith("rtsp://");
-  const isRtmp = lower.startsWith("rtmp://") || lower.startsWith("rtmps://");
-  const isSrt = lower.startsWith("srt://");
-  const isUdp = lower.startsWith("udp://") || lower.startsWith("rtp://");
-
-  /* ================= HLS ================= */
-  if (isHttp && isHls) {
     return [
       "-user_agent", getUserAgent("default"),
 
-      "-reconnect", "1",
-      "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "5",
-
-      "-timeout", "15000000",
-      "-rw_timeout", "20000000",
-
-      "-fflags", "+genpts+discardcorrupt",
-      "-err_detect", "ignore_err",
-
-      "-thread_queue_size", "8192",
-      "-max_delay", "5000000",
-
-      "-analyzeduration", "2M",
-      "-probesize", "2M",
-
-      "-i", s
-    ];
-  }
-
-  /* ================= HTTP TS (WEAK INTERNET) ================= */
-  if (isHttp && isTs) {
-    return [
-      "-user_agent", getUserAgent("default"),
-
+      /* ==== RECONNECT FOREVER ==== */
       "-reconnect", "1",
       "-reconnect_streamed", "1",
       "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "10",
 
+      /* ==== NETWORK BUFFER ==== */
       "-timeout", "20000000",
       "-rw_timeout", "30000000",
 
+      /* ==== ERROR TOLERANCE ==== */
       "-fflags", "+genpts+discardcorrupt+ignidx",
       "-err_detect", "ignore_err",
       "-ignore_unknown", "1",
 
+      /* ==== BUFFER (REAL) ==== */
       "-thread_queue_size", "32768",
       "-max_delay", "15000000",
 
+      /* ==== COPY SAFE ==== */
       "-copyts", "1",
       "-avoid_negative_ts", "make_zero",
 
+      /* ==== FAST RECOVERY ==== */
       "-analyzeduration", "2M",
       "-probesize", "2M",
 
       "-i", s
     ];
-  }
-
-  /* ================= RTSP ================= */
-  if (isRtsp) {
-    return [
-      "-rtsp_transport", "tcp",
-      "-stimeout", "15000000",
-      "-fflags", "+genpts+discardcorrupt",
-      "-err_detect", "ignore_err",
-      "-i", s
-    ];
-  }
-
-  /* ================= SRT ================= */
-  if (isSrt) {
-    return [
-      "-timeout", "15000000",
-      "-fflags", "+genpts+discardcorrupt",
-      "-err_detect", "ignore_err",
-      "-i", s
-    ];
-  }
-
-  /* ================= UDP / RTP ================= */
-  if (isUdp) {
-    return [
-      "-fflags", "+genpts+discardcorrupt",
-      "-i", s
-    ];
-  }
-
-  /* ================= RTMP ================= */
-  if (isRtmp) {
-    return [
-      "-user_agent", getUserAgent("default"),
-
-      "-reconnect", "1",
-      "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "5",
-
-      "-timeout", "15000000",
-
-      "-fflags", "+genpts+discardcorrupt",
-      "-err_detect", "ignore_err",
-
-      "-i", s
-    ];
-  }
-
-  /* ================= LOCAL FILE ================= */
-  return [
-    "-re",
-    "-i", s
-  ];
 }
 
 
