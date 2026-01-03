@@ -423,37 +423,30 @@ function buildInputArgsForSource(source) {
   if (/^https?:\/\//i.test(s)) {
     // If it looks like HLS we handled it earlier, otherwise treat as progressive/http stream
     return [
+	  /* ==== INPUT OPTIONS ==== */
 	  "-user_agent", getUserAgent("default"),
+	  "-reconnect", "1",
+	  "-reconnect_streamed", "1",
+	  "-reconnect_at_eof", "1",
+	  "-reconnect_delay_max", "10",
+	  "-timeout", "20000000",
+	  "-rw_timeout", "30000000",
+	  "-thread_queue_size", "32768",
+	  "-analyzeduration", "2M",
+	  "-probesize", "2M",
+	
+	  /* ==== INPUT SPECIFICATION ==== */
+	  "-i", s,
+	
+	  /* ==== PROCESSING OPTIONS ==== */
+	  "-fflags", "+genpts+discardcorrupt+ignidx",
+	  "-err_detect", "ignore_err",
+	  "-ignore_unknown", "1",
+	  "-copyts",
+	  "-avoid_negative_ts", "make_zero",
+	  "-max_delay", "15000000"
+	];
 
-      /* ==== RECONNECT FOREVER ==== */
-      "-reconnect", "1",
-      "-reconnect_streamed", "1",
-      "-reconnect_at_eof", "1",
-      "-reconnect_delay_max", "10",
-
-      /* ==== NETWORK BUFFER ==== */
-      "-timeout", "20000000",
-      "-rw_timeout", "30000000",
-
-      /* ==== ERROR TOLERANCE ==== */
-      "-fflags", "+genpts+discardcorrupt+ignidx",
-      "-err_detect", "ignore_err",
-      "-ignore_unknown", "1",
-
-      /* ==== BUFFER (REAL) ==== */
-      "-thread_queue_size", "32768",
-      "-max_delay", "15000000",
-
-      /* ==== COPY SAFE ==== */
-      "-copyts", "1",
-      "-avoid_negative_ts", "make_zero",
-
-      /* ==== FAST RECOVERY ==== */
-      "-analyzeduration", "2M",
-      "-probesize", "2M",
-
-      "-i", s
-    ];
   }
 
   // RTMP or other scheme-less input (treat as RTMP or generic)
