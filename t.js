@@ -434,16 +434,15 @@ function buildInputArgsForSource(source) {
 	  "-thread_queue_size", "32768",
 	  "-analyzeduration", "2M",
 	  "-probesize", "2M",
-	
-	  /* ==== INPUT SPECIFICATION ==== */
-	  "-i", s,
-	
 	  /* ==== PROCESSING OPTIONS ==== */
 	  "-fflags", "+genpts+discardcorrupt+ignidx",
 	  "-err_detect", "ignore_err",
-	  "-ignore_unknown", "1",
 	  "-avoid_negative_ts", "make_zero",
 	  "-max_delay", "15000000"
+	  /* ==== INPUT SPECIFICATION ==== */
+	  "-i", s
+	
+	
 	];
 
   }
