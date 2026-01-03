@@ -499,8 +499,6 @@ function buildInputArgsForSource(source) {
         "-err_detect", "ignore_err",
         "-max_delay", "5000000",
         "-flags", "+low_delay",
-        "-exit_on_eof", "0",
-        "-xerror", "0",
         "-stream_loop", "-1",
         "-i", s
       ];
