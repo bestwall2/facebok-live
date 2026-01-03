@@ -438,11 +438,9 @@ function buildInputArgsForSource(source) {
 	  "-fflags", "+genpts+discardcorrupt+ignidx",
 	  "-err_detect", "ignore_err",
 	  "-avoid_negative_ts", "make_zero",
-	  "-max_delay", "15000000"
+	  "-max_delay", "15000000",
 	  /* ==== INPUT SPECIFICATION ==== */
-	  "-i", s
-	
-	
+	  "-i", s		
 	];
 
   }
