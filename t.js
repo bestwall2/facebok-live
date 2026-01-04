@@ -415,33 +415,32 @@ function buildInputArgsForSource(source) {
   if (isHLS) {
     // Optimized args for HLS / live .ts streams
     return [
-      "-reconnect", "1", // automatic reconnect
-      "-reconnect_streamed", "1", // reconnect streamed input
-      "-reconnect_at_eof", "1", // reconnect at EOF for live HLS
-      "-reconnect_delay_max", "15", // max delay between reconnects
-      "-timeout", "20000000", // connection timeout
-      "-rw_timeout", "30000000", // read/write timeout
-      "-thread_queue_size", "32768", // buffer for HD segments
-      "-fflags", "+genpts+discardcorrupt+igndts+low_delay",
-      "-flags", "+low_delay",
-      "-err_detect", "ignore_err",
-      "-max_delay", "10000000",
-      "-i", s // input URL
+      "-user_agent", getUserAgent("default"),
+      "-reconnect", "1",
+      "-reconnect_streamed", "1",
+      "-reconnect_delay_max", "10",
+      "-multiple_requests", "1",
+      "-timeout", "10000000",
+      "-fflags", "+genpts+igndts",
+      "-max_delay", "30000000", // 30 seconds buffer
+      "-thread_queue_size", "16384",
+      "-analyzeduration", "10M",
+      "-probesize", "10M",
+      "-itsoffset", "50",
+      "-i", s
     ];
   } else {
     // HTTP progressive / .ts segments
     return [
+      "-user_agent", getUserAgent("default"),
       "-reconnect", "1",
       "-reconnect_streamed", "1",
-      "-reconnect_at_eof", "1",
       "-reconnect_delay_max", "15",
-      "-timeout", "20000000",
-      "-rw_timeout", "30000000",
-      "-thread_queue_size", "16384",
-      "-fflags", "+genpts+discardcorrupt+igndts+low_delay",
-      "-flags", "+low_delay",
+      "-timeout", "10000000",
+      "-analyzeduration", "5000000",
+      "-probesize", "5000000",
+      "-fflags", "+genpts+discardcorrupt",
       "-err_detect", "ignore_err",
-      "-max_delay", "10000000",
       "-i", s
     ];
   }
