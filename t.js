@@ -41,9 +41,9 @@ const CONFIG = {
 
   // Facebook Post Configuration
   facebookPost: {
-    postId: "100985439354836_841453868647870",
+    postId: "779725158558904_122119653315023471",
     accessToken:
-      "EAAKXMxkBFCIBQVBZCq13bO5Jje0ZCkX7igrViPXwbBBkvWRHKkXzaHxWZBF6w1DGc0eutZCAbUFJMMA7ElvMMIMwLOhn7YrNyXJggg1sIjDKsQfWgHNyrR61Gy2x09VaTyZCzYqZB96fW1yWYL2HYyVTTjBfiBbhUpF8Ooun7z0wU11FjJGm1p0VGdKffm3U1U598GB1n2sQ4uFSh4F1YeZCSEZD",
+      "EAFb7enAJEpABQVEUUWTaYuUMa8TmqDCSaBNTrhtKVMOkpNCzGV6wCU0VE7ZCBA38GAV0OezMn1EyUJOERy4xH1FSzPlnhi7vf0Td8slZAZBv3KOZB6E2imPibIMhb6GY2VMlrq2A8Flpx6jUDKzdFMWUZAmMVfXL7MqwWgLBYOeTcO3LkKdVj3zyhQVrd3fvqQZCM9aJBt",
   },
 };
 
@@ -400,118 +400,51 @@ function getUserAgent(type = "default") {
  /* ================= SOURCE-TYPE ARG BUILDER =================
    Improved HTTP source handling with better reliability
 */
+
 function buildInputArgsForSource(source) {
-  const s = String(source || "").trim();
-  const lower = s.toLowerCase();
-
-  // Detect file (local path) if it looks like a filesystem path (no scheme)
-  const isLocalFile = /^[\w\-.:\\\/]+(\.\w+)?$/.test(s) && !/^[a-z]+:\/\//i.test(s);
-
-  // HLS detection (.m3u8 files)
-  if (/\.m3u8(\?|$)/i.test(s) || lower.includes("m3u8") || lower.includes("hls")) {
+  const s = String(source || "").trim().toLowerCase();
+  
+  // Only handle HTTP/HTTPS streams
+  if (!s.startsWith("http://") && !s.startsWith("https://")) {
+    throw new Error("Only HTTP/HTTPS streams are supported");
+  }
+  
+  // Detect HLS (.m3u8) streams
+  const isHLS = s.includes(".m3u8") || s.includes("hls");
+  
+  if (isHLS) {
+    // Optimized args for HLS / live .ts streams
+    return [
+      "-reconnect", "1", // automatic reconnect
+      "-reconnect_streamed", "1", // reconnect streamed input
+      "-reconnect_at_eof", "1", // reconnect at EOF for live HLS
+      "-reconnect_delay_max", "15", // max delay between reconnects
+      "-timeout", "20000000", // connection timeout
+      "-rw_timeout", "30000000", // read/write timeout
+      "-thread_queue_size", "32768", // buffer for HD segments
+      "-fflags", "+genpts+discardcorrupt+igndts+low_delay",
+      "-flags", "+low_delay",
+      "-err_detect", "ignore_err",
+      "-max_delay", "10000000",
+      "-i", s // input URL
+    ];
+  } else {
+    // HTTP progressive / .ts segments
     return [
       "-reconnect", "1",
       "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "10",
+      "-reconnect_at_eof", "1",
+      "-reconnect_delay_max", "15",
       "-timeout", "20000000",
       "-rw_timeout", "30000000",
-      "-thread_queue_size", "4096",
-      "-fflags", "+genpts+discardcorrupt",
+      "-thread_queue_size", "16384",
+      "-fflags", "+genpts+discardcorrupt+igndts+low_delay",
+      "-flags", "+low_delay",
+      "-err_detect", "ignore_err",
       "-max_delay", "10000000",
       "-i", s
     ];
   }
-
-  // RTSP
-  if (lower.startsWith("rtsp://")) {
-    return [
-      "-rtsp_transport", "tcp",
-      "-stimeout", "10000000",
-      "-fflags", "+genpts+discardcorrupt",
-      "-i", s
-    ];
-  }
-
-  // SRT (srt://)
-  if (lower.startsWith("srt://")) {
-    return [
-      "-timeout", "10000000",
-      "-reconnect", "1",
-      "-fflags", "+genpts+discardcorrupt",
-      "-i", s
-    ];
-  }
-
-  // UDP/RTP (udp:// rtp://)
-  if (lower.startsWith("udp://") || lower.startsWith("rtp://")) {
-    return [
-      "-fflags", "+genpts+discardcorrupt",
-      "-i", s
-    ];
-  }
-
-  // HTTP/HTTPS streams (mp4, mkv, ts, flv, etc.)
-  if (/^https?:\/\//i.test(s)) {
-    // Check if it's a video file extension
-    const isVideoFile = /\.(mp4|mkv|ts|flv|avi|mov|wmv|webm)(\?|$)/i.test(s);
-    
-    if (isVideoFile) {
-      // For HTTP progressive video files
-      return [
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_delay_max", "10",
-        "-timeout", "15000000",
-        "-rw_timeout", "20000000",
-        "-thread_queue_size", "2048",
-        "-fflags", "+genpts+discardcorrupt",
-        "-i", s
-      ];
-    } else {
-      // For generic HTTP streams (livestreams)
-      return [
-        "-reconnect", "1",
-        "-reconnect_streamed", "1",
-        "-reconnect_at_eof", "1",
-        "-reconnect_delay_max", "10",
-        "-timeout", "10000000",
-        "-rw_timeout", "15000000",
-        "-thread_queue_size", "32768",
-        "-fflags", "+genpts+discardcorrupt+ignidx",
-        "-err_detect", "ignore_err",
-        "-max_delay", "5000000",
-        "-flags", "+low_delay",
-        "-stream_loop", "-1",
-        "-i", s
-      ];
-    }
-  }
-
-  // RTMP or RTMPS
-  if (lower.startsWith("rtmp://") || lower.startsWith("rtmps://")) {
-    return [
-      "-reconnect", "1",
-      "-reconnect_streamed", "1",
-      "-reconnect_delay_max", "5",
-      "-timeout", "10000000",
-      "-fflags", "+genpts+discardcorrupt",
-      "-i", s
-    ];
-  }
-
-  // Local file fallback
-  if (isLocalFile) {
-    return [
-      "-re",
-      "-i", s
-    ];
-  }
-
-  // Ultimate fallback: minimal input
-  return [
-    "-re",
-    "-i", s
-  ];
 }
 
 /* THIS TO GET FRESH IMG ALSO DASH URL READY FOR POSTING*/
@@ -709,6 +642,7 @@ async function startFFmpeg(item, force = false) {
   const outputArgs = [
     "-c:v", "copy",
     "-c:a", "copy",
+    "-r", "30",
     "-f", "flv",
     "-loglevel", "error",
     cache.stream_url
