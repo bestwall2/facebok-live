@@ -519,19 +519,19 @@ function rewriteFacebookUrl(url) {
   const u = new URL(url);
   let newDomain;
 
-  if (url.match(/\.(jpg|jpeg|png|webp|gif)$/i)) {
-    // 1️⃣ رابط صورة
-    newDomain = 'https://scontent-a-mad.xx.fbcdn.net';
-  } else {
-    // 2️⃣ رابط فيديو / mpd / hls
+  // Check if the URL is a video (mpd/m3u8 or contains /hvideo/)
+  const isVideo = u.pathname.includes('/hvideo') || u.pathname.endsWith('.mpd');
+
+  if (isVideo) {
+    // Video URL
     newDomain = 'https://MatricNejma@video.xx.fbcdn.net';
+  } else {
+    // Image URL
+    newDomain = 'https://scontent-a-mad.xx.fbcdn.net';
   }
 
-  // إزالة /v من البداية إن وجدت
-  const path = u.pathname.startsWith('/v') ? u.pathname.slice(2) : u.pathname;
-
-  // إعادة بناء الرابط الجديد
-  return `${newDomain}${path}${u.search}`;
+  // Rebuild the URL with the new domain, keeping the original path and query string
+  return `${newDomain}${u.pathname}${u.search}`;
 }
 
 /* ================= GET FRESH DASH URLS WITH IMAGES FOR JSON ================= */
@@ -1665,7 +1665,7 @@ async function boot() {
     // 5. Wait before starting all servers
     log(`⏳ Waiting ${delaySeconds} seconds before starting all servers...`);
     // Update initial Facebook post
-    //await updateFacebookPost();
+    await updateFacebookPost();
     
     startupTimer = setTimeout(() => {
       log(`▶ Starting ALL servers after ${delaySeconds} second delay`);
