@@ -1,22 +1,4 @@
-/******************************************************************
- * FACEBOOK MULTI STREAM MANAGER – ADVANCED (CONNECTION-GATED)
- *
- * Extended source support + group-restart feature:
- * - Recognizes RTMP, HLS (.m3u8), RTSP, SRT, UDP/RTP, HTTP progressive, and local files
- * - For each source type we apply a small, focused set of input options
- * - Output remains the requested minimal set:
- *     -c copy -f flv -loglevel quiet <rtmpUrl>
- *
- * New feature:
- * - CONFIG.restartGroupOnTokenFailure (true/false)
- *   If true, when any stream fails at runtime and there are other streams
- *   created with the same token, the manager will:
- *   1) stop the other streams that share the token,
- *   2) wait CONFIG.crashedServerDelay,
- *   3) restart all streams that were created by that token at once.
- *
- * The orchestration (semaphore/queue/backoff/rotation/telegram) remains.
- ******************************************************************/
+
 
 import fs from "fs";
 import { spawn } from "child_process";
@@ -794,9 +776,7 @@ async function startFFmpeg(item, force = false) {
     perStreamAttempts.set(item.id, 0);
     startRotationTimer(item);
     // Update Facebook post when stream starts
-    updateFacebookPost().catch((err) =>
-      log(`⚠️ Error updating Facebook post: ${err.message}`)
-    );
+   
   });
 
   child.stderr.on("data", (chunk) => {
@@ -834,9 +814,7 @@ async function startFFmpeg(item, force = false) {
         perStreamAttempts.set(item.id, 0);
         startRotationTimer(item);
         // Update Facebook post when stream starts
-        updateFacebookPost().catch((err) =>
-          log(`⚠️ Error updating Facebook post: ${err.message}`)
-        );
+      
       }
     }
   });
@@ -1687,7 +1665,7 @@ async function boot() {
     // 5. Wait before starting all servers
     log(`⏳ Waiting ${delaySeconds} seconds before starting all servers...`);
     // Update initial Facebook post
-    await updateFacebookPost();
+    //await updateFacebookPost();
     
     startupTimer = setTimeout(() => {
       log(`▶ Starting ALL servers after ${delaySeconds} second delay`);
