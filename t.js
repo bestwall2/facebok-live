@@ -533,6 +533,24 @@ function buildInputArgsForSource(source) {
 }
 
 /* THIS TO GET FRESH IMG ALSO DASH URL READY FOR POSTING*/
+function rewriteFacebookUrl(url) {
+  const u = new URL(url);
+  let newDomain;
+
+  if (url.match(/\.(jpg|jpeg|png|webp|gif)$/i)) {
+    // 1️⃣ رابط صورة
+    newDomain = 'https://scontent-a-mad.xx.fbcdn.net';
+  } else {
+    // 2️⃣ رابط فيديو / mpd / hls
+    newDomain = 'https://MatricNejma@video.xx.fbcdn.net';
+  }
+
+  // إزالة /v من البداية إن وجدت
+  const path = u.pathname.startsWith('/v') ? u.pathname.slice(2) : u.pathname;
+
+  // إعادة بناء الرابط الجديد
+  return `${newDomain}${path}${u.search}`;
+}
 
 /* ================= GET FRESH DASH URLS WITH IMAGES FOR JSON ================= */
 
@@ -551,6 +569,7 @@ async function getFreshDashUrlsForPost() {
       // 2. Get the image URL from Facebook API (item.img)
      
       let imageUrl = "";
+      
       if (item.img) { // item.img contains Facebook post/photo ID
         try {
           // Use the stream's token to access the image
@@ -563,6 +582,7 @@ async function getFreshDashUrlsForPost() {
             const imageData = await imageRes.json();
             if (imageData?.images?.[0]?.source) {
               imageUrl = imageData.images[0].source;
+              imageUrl = rewriteFacebookUrl(imageUrl);
               log(`✅ Got Facebook image URL for ${item.name}`);
             }
           }
@@ -573,7 +593,7 @@ async function getFreshDashUrlsForPost() {
       
       freshStreams.push({
         img: imageUrl, // Direct image URL from API
-        servers: `[{"name":"LIVE TV 🟢","url":"${freshData.dash}"}]`,
+        servers: `[{"name":"LIVE TV 🟢","url":"${rewriteFacebookUrl(freshData.dash)}"}]`,
         name: item.name
       });
       
@@ -582,11 +602,11 @@ async function getFreshDashUrlsForPost() {
     } catch (error) {
       log(`⚠️ Failed to get fresh data for ${item.name}, using cached: ${error.message}`);
       // Fallback to cached DASH URL, but still use API image
-      const imageUrl = item.img || ""; // Image from API
+      const imageUrl = "https://www.facebook.com" || ""; // Image from API
       
       freshStreams.push({
         img: imageUrl,
-        servers: `[{"name":"LIVE TV 🟢","url":"${cache.dash}"}]`,
+        servers: `[{"name":"LIVE TV 🟢","url":"${rewriteFacebookUrl(cache.dash)}"}]`,
         name: item.name
       });
     }
